@@ -1,4 +1,4 @@
-import { mainnet, base, arbitrum, optimism, polygon } from 'viem/chains';
+import { mainnet, base, arbitrum, optimism, polygon, bsc, sonic } from 'viem/chains';
 import { defineChain } from 'viem';
 
 // Define Katana chain
@@ -29,7 +29,7 @@ export const katana = defineChain({
 export interface ChainConfig {
   id: number;
   name: string;
-  viemChain: typeof mainnet | typeof base | typeof arbitrum | typeof optimism | typeof polygon | typeof katana;
+  viemChain: typeof mainnet | typeof base | typeof arbitrum | typeof optimism | typeof polygon | typeof bsc | typeof sonic | typeof katana;
   rpcUrl: string;
   backupRpcUrl: string;
   explorerApiUrl: string;
@@ -42,6 +42,8 @@ export const CHAIN_ID_MAP = {
   'Arbitrum': 42161,
   'Optimism': 10,
   'Polygon': 137,
+  'BNB': 56,
+  'Sonic': 146,
   'Katana': 747474,
 } as const;
 
@@ -90,6 +92,24 @@ export const SUPPORTED_CHAINS: ChainConfig[] = [
     backupRpcUrl: 'https://polygon-rpc.com',
     explorerApiUrl: 'https://api.etherscan.io/v2/api',
     explorerUrl: 'https://polygonscan.com'
+  },
+  {
+    id: 56,
+    name: 'BNB',
+    viemChain: bsc,
+    rpcUrl: 'https://1rpc.io/bnb',
+    backupRpcUrl: 'https://bsc-dataseed.binance.org',
+    explorerApiUrl: 'https://api.etherscan.io/v2/api',
+    explorerUrl: 'https://bscscan.com'
+  },
+  {
+    id: 146,
+    name: 'Sonic',
+    viemChain: sonic,
+    rpcUrl: 'https://sonic.drpc.org',
+    backupRpcUrl: 'https://rpc.soniclabs.com',
+    explorerApiUrl: 'https://api.etherscan.io/v2/api',
+    explorerUrl: 'https://sonicscan.org'
   },
   {
     id: 747474,
@@ -154,6 +174,18 @@ export const CHAIN_EXAMPLES: Record<number, ExampleMultisig[]> = {
     { address: '0x47290de56e71dc6f46c26e50776fe86cc8b21656', name: 'Stargate Finance Multisig' },
     { address: '0xc4ad0000e223e398dc329235e6c497db5470b626', name: 'Yearn pchad Multisig' },
     { address: '0xa4b291ed1220310d3120f515b5b7accaecd66f17', name: 'PolyNetwork Multisig' }
+  ],
+
+  // BNB (56)
+  56: [
+    { address: '0x0128ea927198f39e4955ddb01fd62e8de6b3e6a4', name: 'Angle Governance Multisig' },
+    { address: '0xc61b9bb3a7a0767e3179713f3a5c7a9aedce193c', name: 'Bitfinex Multisig' }
+  ],
+
+  // Sonic (146)
+  146: [
+    { address: '0x7461d8c0fDF376c847b651D882DEa4C73fad2e4B', name: 'Silo Fees Receiver' },
+    { address: '0x600ad881ace196c27d0cf14e662ad03c6a5b4de8', name: 'Shadow Partners Multisig' }
   ],
 
   // Katana (747474)
