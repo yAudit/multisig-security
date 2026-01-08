@@ -1,35 +1,20 @@
-import { mainnet, base, arbitrum, optimism, polygon, bsc, sonic } from 'viem/chains';
-import { defineChain } from 'viem';
+import { mainnet, base, arbitrum, optimism, polygon, bsc, sonic, katana } from 'viem/chains';
+import type { Chain } from 'viem/chains';
 
-// Define Katana chain
-export const katana = defineChain({
-  id: 747474,
-  name: 'Katana',
-  nativeCurrency: {
-    decimals: 18,
-    name: 'Ether',
-    symbol: 'ETH',
-  },
-  rpcUrls: {
-    default: {
-      http: ['https://katana.drpc.org'],
-    },
-  },
-  blockExplorers: {
-    default: { name: 'Katana Explorer', url: 'https://katana-explorer.com' },
-  },
+const katanaWithMulticall = {
+  ...katana,
   contracts: {
+    ...katana.contracts,
     multicall3: {
       address: '0xcA11bde05977b3631167028862bE2a173976CA11',
-      blockCreated: 1,
     },
   },
-});
+} as const;
 
 export interface ChainConfig {
   id: number;
   name: string;
-  viemChain: typeof mainnet | typeof base | typeof arbitrum | typeof optimism | typeof polygon | typeof bsc | typeof sonic | typeof katana;
+  viemChain: Chain;
   rpcUrl: string;
   backupRpcUrl: string;
   explorerApiUrl: string;
@@ -114,11 +99,11 @@ export const SUPPORTED_CHAINS: ChainConfig[] = [
   {
     id: 747474,
     name: 'Katana',
-    viemChain: katana,
+    viemChain: katanaWithMulticall,
     rpcUrl: 'https://rpc.katana.network',
     backupRpcUrl: 'https://katana.drpc.org',
     explorerApiUrl: 'https://api.etherscan.io/v2/api',
-    explorerUrl: 'https://katana-explorer.com'
+    explorerUrl: 'https://katanascan.com/'
   }
 ];
 
