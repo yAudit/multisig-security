@@ -343,57 +343,116 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
     return 'latest'; // Should not reach here, but default to latest
   };
 
-  const batchGnosisSafeCalls = async (address: string, chain: ChainConfig) => {
+  const readSafeCoreIndividually = async (address: string, chain: ChainConfig) => {
+    const version = await executeWithBackup(chain, async (client) => {
+      return await client.readContract({
+        address: address as `0x${string}`,
+        abi: GNOSIS_SAFE_ABI,
+        functionName: 'VERSION',
+      });
+    });
+
+    const threshold = await executeWithBackup(chain, async (client) => {
+      return await client.readContract({
+        address: address as `0x${string}`,
+        abi: GNOSIS_SAFE_ABI,
+        functionName: 'getThreshold',
+      });
+    });
+
+    const owners = await executeWithBackup(chain, async (client) => {
+      return await client.readContract({
+        address: address as `0x${string}`,
+        abi: GNOSIS_SAFE_ABI,
+        functionName: 'getOwners',
+      });
+    });
+
+    const nonce = await executeWithBackup(chain, async (client) => {
+      return await client.readContract({
+        address: address as `0x${string}`,
+        abi: GNOSIS_SAFE_ABI,
+        functionName: 'nonce',
+      });
+    });
+
+    let modules: readonly string[] = [];
     try {
-      const results = await executeWithBackup(chain, async (client) => {
-        const calls = [
-        {
-          address: address as `0x${string}`,
-          abi: GNOSIS_SAFE_ABI,
-          functionName: 'VERSION',
-        },
-        {
-          address: address as `0x${string}`,
-          abi: GNOSIS_SAFE_ABI,
-          functionName: 'getThreshold',
-        },
-        {
-          address: address as `0x${string}`,
-          abi: GNOSIS_SAFE_ABI,
-          functionName: 'getOwners',
-        },
-        {
-          address: address as `0x${string}`,
-          abi: GNOSIS_SAFE_ABI,
-          functionName: 'nonce',
-        },
-        {
+      const [moduleArray] = await executeWithBackup(chain, async (client) => {
+        return await client.readContract({
           address: address as `0x${string}`,
           abi: GNOSIS_SAFE_ABI,
           functionName: 'getModulesPaginated',
           args: [SENTINEL_MODULES_ADDRESS, 10],
-        },
-      ];
+        });
+      });
+      modules = moduleArray;
+    } catch {
+      // Optional modules are not available on older Safe versions. Leave empty.
+    }
+
+    // Validate version format
+    if (!checkVersionFormat(version)) {
+      throw new Error('Contract does not appear to be a Safe multisig (invalid VERSION format)');
+    }
+
+    return {
+      version: version as string,
+      threshold: threshold as bigint,
+      owners: owners as readonly string[],
+      nonce: nonce as bigint,
+      modules,
+    };
+  };
+
+  const batchGnosisSafeCalls = async (address: string, chain: ChainConfig) => {
+    try {
+      const results = await executeWithBackup(chain, async (client) => {
+        const calls = [
+          {
+            address: address as `0x${string}`,
+            abi: GNOSIS_SAFE_ABI,
+            functionName: 'VERSION',
+          },
+          {
+            address: address as `0x${string}`,
+            abi: GNOSIS_SAFE_ABI,
+            functionName: 'getThreshold',
+          },
+          {
+            address: address as `0x${string}`,
+            abi: GNOSIS_SAFE_ABI,
+            functionName: 'getOwners',
+          },
+          {
+            address: address as `0x${string}`,
+            abi: GNOSIS_SAFE_ABI,
+            functionName: 'nonce',
+          },
+          {
+            address: address as `0x${string}`,
+            abi: GNOSIS_SAFE_ABI,
+            functionName: 'getModulesPaginated',
+            args: [SENTINEL_MODULES_ADDRESS, 10],
+          },
+        ];
 
         return await multicall(client, {
           contracts: calls,
+          allowFailure: true,
         });
       });
 
       // Process results and handle potential errors
       const [versionResult, thresholdResult, ownersResult, nonceResult, modulesResult] = results;
 
-      if (versionResult.status === 'failure') {
-        throw new Error('Contract does not appear to be a Safe multisig (no VERSION function)');
-      }
-      if (thresholdResult.status === 'failure') {
-        throw new Error('Contract does not appear to be a Safe multisig (no getThreshold function)');
-      }
-      if (ownersResult.status === 'failure') {
-        throw new Error('Contract does not appear to be a Safe multisig (no getOwners function)');
-      }
-      if (nonceResult.status === 'failure') {
-        throw new Error('Contract does not appear to be a Safe multisig (no nonce function)');
+      if (
+        versionResult.status === 'failure' ||
+        thresholdResult.status === 'failure' ||
+        ownersResult.status === 'failure' ||
+        nonceResult.status === 'failure'
+      ) {
+        return await readSafeCoreIndividually(address, chain);
       }
 
       const version = versionResult.result as string;
@@ -425,8 +484,19 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
       if (error && (error as RpcError).isRpcFailure) {
         throw error; // Re-throw RPC failure with the original message
       }
-      
+
+      try {
+        return await readSafeCoreIndividually(address, chain);
+      } catch (fallbackError) {
+        if (fallbackError instanceof Error) {
+          throw fallbackError;
+        }
+      }
+
       // If not an RPC failure, it might be a contract issue
+      if (error instanceof Error) {
+        throw error;
+      }
       throw new Error('Contract does not appear to be a Safe multisig or network error occurred');
     }
   };

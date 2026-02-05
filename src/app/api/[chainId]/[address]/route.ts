@@ -93,14 +93,36 @@ export async function GET(
   }
 
   try {
-    // Create blockchain client
-    const client = createPublicClient({
-      chain: chain.viemChain,
-      transport: http(chain.rpcUrl)
-    });
+    const createClient = (useBackup = false) => {
+      const rpcUrl = useBackup ? chain.backupRpcUrl : chain.rpcUrl;
+      return createPublicClient({
+        chain: chain.viemChain,
+        transport: http(rpcUrl)
+      });
+    };
+
+    const executeWithBackup = async <T,>(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      operation: (client: any) => Promise<T>
+    ): Promise<T> => {
+      try {
+        const primaryClient = createClient();
+        return await operation(primaryClient);
+      } catch (primaryError) {
+        try {
+          const backupClient = createClient(true);
+          return await operation(backupClient);
+        } catch (backupError) {
+          console.error(`Both primary and backup RPC failed for ${chain.name}:`, primaryError, backupError);
+          throw primaryError;
+        }
+      }
+    };
 
     // Check if address is a contract
-    const code = await client.getBytecode({ address: address as `0x${string}` });
+    const code = await executeWithBackup((client) => {
+      return client.getBytecode({ address: address as `0x${string}` });
+    });
     if (!code || code === '0x') {
       const errorResponse: ApiResponse = {
         address,
@@ -113,73 +135,191 @@ export async function GET(
       return NextResponse.json(errorResponse, { status: 400 });
     }
 
-    // Prepare multicall for Safe data - including guard and fallback handler
-    const multicallData = await multicall(client, {
-      contracts: [
-        {
+    const readSafeCoreIndividually = async () => {
+      const version = await executeWithBackup((client) => {
+        return client.readContract({
           address: address as `0x${string}`,
           abi: GNOSIS_SAFE_ABI,
           functionName: 'VERSION',
-        },
-        {
+        });
+      });
+
+      const threshold = await executeWithBackup((client) => {
+        return client.readContract({
           address: address as `0x${string}`,
           abi: GNOSIS_SAFE_ABI,
           functionName: 'getThreshold',
-        },
-        {
+        });
+      });
+
+      const owners = await executeWithBackup((client) => {
+        return client.readContract({
           address: address as `0x${string}`,
           abi: GNOSIS_SAFE_ABI,
           functionName: 'getOwners',
-        },
-        {
+        });
+      });
+
+      const nonce = await executeWithBackup((client) => {
+        return client.readContract({
           address: address as `0x${string}`,
           abi: GNOSIS_SAFE_ABI,
           functionName: 'nonce',
-        },
-        {
-          address: address as `0x${string}`,
-          abi: GNOSIS_SAFE_ABI,
-          functionName: 'getModulesPaginated',
-          args: ['0x0000000000000000000000000000000000000001', 10n],
-        },
-        // Add guard and fallback handler calls
-        {
-          address: address as `0x${string}`,
-          abi: [{"inputs":[],"name":"getGuard","outputs":[{"internalType":"address","name":"","type":"address"}],"stateMutability":"view","type":"function"}],
-          functionName: 'getGuard',
-          args: [],
-        },
-        {
-          address: address as `0x${string}`,
-          abi: [{"inputs":[],"name":"getFallbackHandler","outputs":[{"internalType":"address","name":"handler","type":"address"}],"stateMutability":"view","type":"function"}],
-          functionName: 'getFallbackHandler',
-          args: [],
-        },
-      ],
-    });
+        });
+      });
 
-    // Extract results
-    const [versionResult, thresholdResult, ownersResult, nonceResult, modulesResult, guardResult, fallbackHandlerResult] = multicallData;
+      let modules: string[] = [];
+      try {
+        const [moduleArray] = await executeWithBackup((client) => {
+          return client.readContract({
+            address: address as `0x${string}`,
+            abi: GNOSIS_SAFE_ABI,
+            functionName: 'getModulesPaginated',
+            args: ['0x0000000000000000000000000000000000000001', 10n],
+          });
+        });
+        modules = moduleArray as string[];
+      } catch {
+        // Optional modules might not be supported on older Safe versions.
+      }
 
-    if (versionResult.status !== 'success' || !versionResult.result) {
-      const errorResponse: ApiResponse = {
-        address,
-        chainId: parseInt(chainId),
-        chainName: chain.name,
-        analyzedAt: new Date().toISOString(),
-        success: false,
-        error: 'Address does not appear to be a valid Gnosis Safe contract'
+      let guard = '0x0000000000000000000000000000000000000000';
+      try {
+        guard = await executeWithBackup((client) => {
+          return client.readContract({
+            address: address as `0x${string}`,
+            abi: [{"inputs":[],"name":"getGuard","outputs":[{"internalType":"address","name":"","type":"address"}],"stateMutability":"view","type":"function"}],
+            functionName: 'getGuard',
+            args: [],
+          });
+        });
+      } catch {
+        // Guard is optional.
+      }
+
+      let fallbackHandler = '0x0000000000000000000000000000000000000000';
+      try {
+        fallbackHandler = await executeWithBackup((client) => {
+          return client.readContract({
+            address: address as `0x${string}`,
+            abi: [{"inputs":[],"name":"getFallbackHandler","outputs":[{"internalType":"address","name":"handler","type":"address"}],"stateMutability":"view","type":"function"}],
+            functionName: 'getFallbackHandler',
+            args: [],
+          });
+        });
+      } catch {
+        // Fallback handler is optional.
+      }
+
+      return {
+        version: version as string,
+        threshold: Number(threshold),
+        owners: owners as string[],
+        nonce: Number(nonce),
+        modules,
+        guard: guard as string,
+        fallbackHandler: fallbackHandler as string
       };
-      return NextResponse.json(errorResponse, { status: 400 });
-    }
+    };
 
-    const version = versionResult.result as string;
-    const threshold = thresholdResult.status === 'success' ? Number(thresholdResult.result) : 0;
-    const owners = ownersResult.status === 'success' ? (ownersResult.result as string[]) : [];
-    const nonce = nonceResult.status === 'success' ? Number(nonceResult.result) : 0;
-    const modules = modulesResult.status === 'success' ? (modulesResult.result as [string[], string])[0] : [];
-    const guard = guardResult.status === 'success' ? guardResult.result as string : '0x0000000000000000000000000000000000000000';
-    const fallbackHandler = fallbackHandlerResult.status === 'success' ? fallbackHandlerResult.result as string : '0x0000000000000000000000000000000000000000';
+    // Prepare multicall for Safe data - including guard and fallback handler
+    let version = '';
+    let threshold = 0;
+    let owners: string[] = [];
+    let nonce = 0;
+    let modules: string[] = [];
+    let guard = '0x0000000000000000000000000000000000000000';
+    let fallbackHandler = '0x0000000000000000000000000000000000000000';
+
+    try {
+      const multicallData = await executeWithBackup((client) => {
+        return multicall(client, {
+          contracts: [
+            {
+              address: address as `0x${string}`,
+              abi: GNOSIS_SAFE_ABI,
+              functionName: 'VERSION',
+            },
+            {
+              address: address as `0x${string}`,
+              abi: GNOSIS_SAFE_ABI,
+              functionName: 'getThreshold',
+            },
+            {
+              address: address as `0x${string}`,
+              abi: GNOSIS_SAFE_ABI,
+              functionName: 'getOwners',
+            },
+            {
+              address: address as `0x${string}`,
+              abi: GNOSIS_SAFE_ABI,
+              functionName: 'nonce',
+            },
+            {
+              address: address as `0x${string}`,
+              abi: GNOSIS_SAFE_ABI,
+              functionName: 'getModulesPaginated',
+              args: ['0x0000000000000000000000000000000000000001', 10n],
+            },
+            // Add guard and fallback handler calls
+            {
+              address: address as `0x${string}`,
+              abi: [{"inputs":[],"name":"getGuard","outputs":[{"internalType":"address","name":"","type":"address"}],"stateMutability":"view","type":"function"}],
+              functionName: 'getGuard',
+              args: [],
+            },
+            {
+              address: address as `0x${string}`,
+              abi: [{"inputs":[],"name":"getFallbackHandler","outputs":[{"internalType":"address","name":"handler","type":"address"}],"stateMutability":"view","type":"function"}],
+              functionName: 'getFallbackHandler',
+              args: [],
+            },
+          ],
+          allowFailure: true,
+        });
+      });
+
+      // Extract results
+      const [versionResult, thresholdResult, ownersResult, nonceResult, modulesResult, guardResult, fallbackHandlerResult] = multicallData;
+
+      if (
+        versionResult.status !== 'success' ||
+        thresholdResult.status !== 'success' ||
+        ownersResult.status !== 'success' ||
+        nonceResult.status !== 'success'
+      ) {
+        throw new Error('Multicall returned partial failures');
+      }
+
+      version = versionResult.result as string;
+      threshold = Number(thresholdResult.result);
+      owners = ownersResult.result as string[];
+      nonce = Number(nonceResult.result);
+      modules = modulesResult.status === 'success' ? (modulesResult.result as [string[], string])[0] : [];
+      guard = guardResult.status === 'success' ? guardResult.result as string : '0x0000000000000000000000000000000000000000';
+      fallbackHandler = fallbackHandlerResult.status === 'success' ? fallbackHandlerResult.result as string : '0x0000000000000000000000000000000000000000';
+    } catch (multicallError) {
+      try {
+        const safeCore = await readSafeCoreIndividually();
+        version = safeCore.version;
+        threshold = safeCore.threshold;
+        owners = safeCore.owners;
+        nonce = safeCore.nonce;
+        modules = safeCore.modules;
+        guard = safeCore.guard;
+        fallbackHandler = safeCore.fallbackHandler;
+      } catch (fallbackError) {
+        const errorResponse: ApiResponse = {
+          address,
+          chainId: parseInt(chainId),
+          chainName: chain.name,
+          analyzedAt: new Date().toISOString(),
+          success: false,
+          error: `Address does not appear to be a valid Gnosis Safe contract${multicallError instanceof Error ? ` (${multicallError.message})` : ''}`
+        };
+        return NextResponse.json(errorResponse, { status: 400 });
+      }
+    }
 
     // Perform all 14 security checks
     const checks = await performAllSecurityChecks({
@@ -193,7 +333,7 @@ export async function GET(
       modules,
       guard,
       fallbackHandler,
-      client
+      client: createClient()
     });
 
     const securityScore = calculateSecurityScore(checks);
