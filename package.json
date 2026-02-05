@@ -14,19 +14,19 @@
   "dependencies": {
     "@safe-global/protocol-kit": "^6.1.2",
     "@safe-global/types-kit": "^3.0.0",
-    "next": "15.5.9",
+    "next": "16.1.6",
     "react": "19.2.3",
     "react-dom": "19.2.3",
-    "viem": "^2.43.5"
+    "viem": "^2.45.1"
   },
   "devDependencies": {
     "@eslint/eslintrc": "^3.3.3",
     "@tailwindcss/postcss": "^4.1.18",
-    "@types/node": "^20.19.27",
-    "@types/react": "^19.2.7",
+    "@types/node": "^25.2.1",
+    "@types/react": "^19.2.13",
     "@types/react-dom": "^19.2.3",
     "eslint": "^9.39.2",
-    "eslint-config-next": "15.5.9",
+    "eslint-config-next": "16.1.6",
     "tailwindcss": "^4.1.18",
     "typescript": "^5.9.3"
   }
