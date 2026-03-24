@@ -13,7 +13,7 @@ export default function Home() {
           <p className="text-lg text-gray-600 max-w-2xl mx-auto">
             Analyze your Safe multisig contract for security best practices.<br/>
             Enter an address to get started. More info in <a
-              href="https://blog.electisec.com/multisig-security" target="_blank"
+              href="https://blog.yaudit.dev/multisig-security" target="_blank"
               rel="noopener noreferrer" className="text-blue-600 hover:text-blue-800 underline">the blog</a>.
           </p>
         </div>
@@ -33,7 +33,7 @@ export default function Home() {
             </a>
             {' '}or create a{' '}
              <a
-              href="https://github.com/electisec/multisig-security"
+              href="https://github.com/yaudit/multisig-security"
               target="_blank"
               rel="noopener noreferrer"
               className="text-blue-600 hover:text-blue-800 underline">
