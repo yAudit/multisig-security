@@ -1,26 +1,204 @@
 @import "tailwindcss";
 
-:root {
-  --background: #ffffff;
-  --foreground: #171717;
+/* Configure dark mode to use data-theme attribute */
+@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
+
+/* ============================================
+   MODERN THEME - LIGHT
+   ============================================ */
+:root[data-theme="light"] {
+  /* Surface tokens (backgrounds) */
+  --color-app: hsl(0 0% 98%);
+  --color-surface: hsl(0 0% 100%);
+  --color-surface-secondary: hsl(0 0% 96%);
+  --color-surface-tertiary: hsl(0 0% 90%);
+
+  /* Text tokens */
+  --color-text-primary: hsl(0 0% 9%);
+  --color-text-secondary: hsl(0 0% 32%);
+  --color-text-tertiary: hsl(0 0% 64%);
+
+  /* Border tokens */
+  --color-border: hsl(0 0% 90%);
+  --color-border-hover: hsl(0 0% 83%);
+
+  /* Brand Colors */
+  --color-primary: hsl(220 95% 50%);
+  --color-primary-hover: hsl(220 100% 44%);
+  --color-primary-100: hsl(220 100% 94%);
+  --color-primary-200: hsl(220 81% 88%);
+  --color-primary-500: hsl(220 95% 50%);
+  --color-primary-600: hsl(220 100% 44%);
+
+  /* Semantic colors */
+  --color-success: hsl(142 71% 45%);
+  --color-success-bg: hsl(142 76% 97%);
+  --color-warning: hsl(17 88% 48%);
+  --color-warning-bg: hsl(17 100% 96%);
+  --color-error: hsl(0 73% 51%);
+  --color-error-bg: hsl(0 100% 97%);
 }
 
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
+/* ============================================
+   MODERN THEME - DARK
+   ============================================ */
+:root[data-theme="dark"] {
+  /* Surface tokens (backgrounds) */
+  --color-app: hsl(0 0% 0%);
+  --color-surface: hsl(0 0% 4%);
+  --color-surface-secondary: hsl(0 0% 9%);
+  --color-surface-tertiary: hsl(0 0% 15%);
+
+  /* Text tokens */
+  --color-text-primary: hsl(0 0% 98%);
+  --color-text-secondary: hsl(0 0% 64%);
+  --color-text-tertiary: hsl(0 0% 32%);
+
+  /* Border tokens */
+  --color-border: hsl(0 0% 15%);
+  --color-border-hover: hsl(0 0% 20%);
+
+  /* Brand Colors */
+  --color-primary: hsl(220 95% 50%);
+  --color-primary-hover: hsl(220 100% 55%);
+  --color-primary-100: hsl(220 100% 15%);
+  --color-primary-200: hsl(220 81% 25%);
+  --color-primary-500: hsl(220 95% 50%);
+  --color-primary-600: hsl(220 100% 55%);
+
+  /* Semantic colors */
+  --color-success: hsl(142 71% 45%);
+  --color-success-bg: hsl(142 76% 10%);
+  --color-warning: hsl(17 88% 48%);
+  --color-warning-bg: hsl(17 100% 10%);
+  --color-error: hsl(0 73% 51%);
+  --color-error-bg: hsl(0 100% 10%);
+}
+
+/* ============================================
+   DEFAULT THEME (Fallback)
+   ============================================ */
+:root {
+  /* Default to light theme */
+  --color-app: hsl(0 0% 98%);
+  --color-surface: hsl(0 0% 100%);
+  --color-surface-secondary: hsl(0 0% 96%);
+  --color-surface-tertiary: hsl(0 0% 90%);
+  --color-text-primary: hsl(0 0% 9%);
+  --color-text-secondary: hsl(0 0% 32%);
+  --color-text-tertiary: hsl(0 0% 64%);
+  --color-border: hsl(0 0% 90%);
+  --color-border-hover: hsl(0 0% 83%);
+  --color-primary: hsl(220 95% 50%);
+  --color-primary-hover: hsl(220 100% 44%);
+  --color-primary-100: hsl(220 100% 94%);
+  --color-primary-200: hsl(220 81% 88%);
+  --color-primary-500: hsl(220 95% 50%);
+  --color-primary-600: hsl(220 100% 44%);
+  --color-success: hsl(142 71% 45%);
+  --color-success-bg: hsl(142 76% 97%);
+  --color-warning: hsl(17 88% 48%);
+  --color-warning-bg: hsl(17 100% 96%);
+  --color-error: hsl(0 73% 51%);
+  --color-error-bg: hsl(0 100% 97%);
+
+  /* Font families */
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
+/* ============================================
+   BASE STYLES
+   ============================================ */
+body {
+  background: var(--color-app);
+  color: var(--color-text-primary);
+  font-family: var(--font-sans), Arial, Helvetica, sans-serif;
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--color-border);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-border-hover);
+}
+
+/* Selection */
+::selection {
+  background: var(--color-primary-200);
+  color: var(--color-text-primary);
+}
+
+/* Focus */
+:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
+}
+
+/* Smooth transitions for interactive elements */
+button,
+a,
+input,
+select,
+[role="button"],
+[role="tab"] {
+  transition-property: background-color, border-color, color;
+  transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
+  transition-duration: 150ms;
+}
+
+/* ============================================
+   MOBILE QUICK WINS
+   ============================================ */
+
+/* Safe area for notched devices */
+@supports (padding: max(0px)) {
+  .mobile-safe {
+    padding-bottom: max(1rem, env(safe-area-inset-bottom));
+  }
+  
+  .mobile-safe-top {
+    padding-top: max(1rem, env(safe-area-inset-top));
+  }
+  
+  .mobile-safe-x {
+    padding-left: max(1rem, env(safe-area-inset-left));
+    padding-right: max(1rem, env(safe-area-inset-right));
   }
 }
 
-body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: var(--font-sans), Arial, Helvetica, sans-serif;
+/* Smooth scrolling for iOS */
+.scroll-smooth-touch {
+  -webkit-overflow-scrolling: touch;
+}
+
+/* Prevent text zoom on input focus (iOS) - must be 16px minimum */
+input, select, textarea {
+  font-size: 16px;
+}
+
+/* Touch target size - minimum 44x44px for accessibility */
+.touch-target {
+  min-height: 44px;
+  min-width: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* Ensure clickable elements have adequate spacing */
+button, a {
+  touch-action: manipulation;
 }

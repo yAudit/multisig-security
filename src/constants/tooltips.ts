@@ -123,6 +123,15 @@ export const SECURITY_CHECK_TOOLTIPS: Record<string, TooltipInfo> = {
       { status: '⚠️ Warning', condition: 'Same signer addresses used on multiple chains' }
     ],
     learnMoreUrl: 'https://docs.safe.global/advanced/eip-155'
+  },
+  'Signing Speed Analysis': {
+    description: 'Analyzes the time between first and last signature for recent transactions. Very fast signing may indicate insufficient transaction review and potential centralization risk. Click to expand and view detailed transaction timing data.',
+    thresholds: [
+      { status: '✅ Slow (Safe)', condition: 'Average signing time > 6 hours (adequate review time)' },
+      { status: '⚠️ Moderate', condition: 'Average signing time 10 minutes - 6 hours' },
+      { status: '❌ Fast (Risky)', condition: 'Average signing time < 10 minutes (insufficient review)' }
+    ],
+    learnMoreUrl: 'https://docs.safe.global/'
   }
 };
 

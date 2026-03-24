@@ -7,6 +7,9 @@ import Safe from '@safe-global/protocol-kit';
 import { GNOSIS_SAFE_ABI, OFFICIAL_SAFE_FALLBACK_HANDLERS, SENTINEL_MODULES_ADDRESS } from '../constants/contracts';
 import { SUPPORTED_CHAINS, DEFAULT_CHAIN, CHAIN_ID_MAP, CHAIN_EXAMPLES, type ChainConfig } from '../constants/chains';
 import { getTooltipInfo } from '../constants/tooltips';
+import { Search, Share2, Info, CheckCircle, AlertTriangle, XCircle, Loader2, Zap } from 'lucide-react';
+import { cn } from '@/lib/utils';
+import { SpeedTest } from './SpeedTest';
 
 // Extended Error type for RPC failures
 interface RpcError extends Error {
@@ -1208,6 +1211,7 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
 
       // Initialize all sections with loading status
       const initialResults: SecurityCheck[] = [
+        { title: 'Signing Speed Analysis', status: 'loading', message: 'Analyzing transaction signing patterns...' },
         { title: 'Signer Threshold', status: 'loading', message: 'Loading threshold information...' },
         { title: 'Signer Threshold Percentage', status: 'loading', message: 'Loading threshold percentage...' },
         { title: 'Safe Version', status: 'loading', message: 'Loading version information...' },
@@ -1235,7 +1239,7 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
         setResults(currentResults => {
           const newResults = [...currentResults];
           const versionStatus = compareVersions(version, latestVersion, secondLatestVersion, latestReleaseDate);
-          newResults[2] = {
+          newResults[3] = {
             title: 'Safe Version',
             status: versionStatus === 'latest' || versionStatus === 'second-latest' ? 'success' : versionStatus === 'old' ? 'warning' : 'error',
             message: versionStatus === 'latest'
@@ -1257,7 +1261,7 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
 
       // Update Signer Threshold (using already validated threshold)
       const thresholdNum = Number(threshold);
-      updatedResults[0] = {
+      updatedResults[1] = {
         title: 'Signer Threshold',
         status: thresholdNum === 1 ? 'error' : thresholdNum <= 3 ? 'warning' : 'success',
         message: thresholdNum === 1
@@ -1271,7 +1275,7 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
       // Update Signer threshold percentage (using already validated owners)
       const ownerCount = owners.length;
       const thresholdPercentage = (thresholdNum / ownerCount) * 100;
-      updatedResults[1] = {
+      updatedResults[2] = {
         title: 'Signer Threshold Percentage',
         status: thresholdPercentage < 34 ? 'error' : thresholdPercentage < 51 ? 'warning' : 'success',
         message: thresholdPercentage < 34
@@ -1299,7 +1303,7 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
           if (creationDate) {
             const daysSinceCreation = (Date.now() - creationDate.getTime()) / (1000 * 60 * 60 * 24);
             const formattedDate = creationDate.toLocaleDateString();
-            newResults[3] = {
+            newResults[4] = {
               title: 'Contract Creation Date',
               status: daysSinceCreation <= 7 ? 'error' : daysSinceCreation <= 60 ? 'warning' : 'success',
               message: daysSinceCreation <= 7
@@ -1309,7 +1313,7 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
                   : `Established contract deployed ${Math.floor(daysSinceCreation)} days ago on ${formattedDate}.`
             };
           } else {
-            newResults[3] = {
+            newResults[4] = {
               title: 'Contract Creation Date',
               status: 'warning',
               message: 'Could not determine contract creation date'
@@ -1321,7 +1325,7 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
 
       // Update Multisig nonce (using multicall result)
       const nonceNum = Number(nonce);
-      updatedResults[4] = {
+      updatedResults[5] = {
         title: 'Multisig Nonce',
         status: nonceNum <= 3 ? 'error' : nonceNum <= 10 ? 'warning' : 'success',
         message: nonceNum <= 3
@@ -1333,7 +1337,7 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
       setResults([...updatedResults]);
 
       // Update Optional Modules (using multicall result) with loading state initially
-      updatedResults[6] = {
+      updatedResults[7] = {
         title: 'Optional Modules',
         status: modules.length === 0 ? 'success' : 'loading',
         message: modules.length === 0
@@ -1373,7 +1377,7 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
         fetchModulesSequentially().then(moduleDetails => {
           setResults(currentResults => {
             const newResults = [...currentResults];
-            newResults[6] = {
+            newResults[7] = {
               title: 'Optional Modules',
               status: 'warning',
               message: (
@@ -1408,7 +1412,7 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
           console.error('Error fetching module names:', error);
           setResults(currentResults => {
             const newResults = [...currentResults];
-            newResults[6] = {
+            newResults[7] = {
               title: 'Optional Modules',
               status: 'warning',
               message: `${modules.length} module${modules.length === 1 ? '' : 's'} enabled. Review module security. Could not load module names.`
@@ -1426,7 +1430,7 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
           // Check nonce first - if it's 0, this Safe has never executed a transaction
           const nonceNum = Number(nonce);
           if (nonceNum === 0) {
-            newResults[5] = {
+            newResults[6] = {
               title: 'Last Transaction Date',
               status: 'warning',
               message: 'No transactions found. This Safe has never been used.'
@@ -1434,7 +1438,7 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
           } else if (lastTxDate) {
             const daysSinceLastTx = (Date.now() - lastTxDate.getTime()) / (1000 * 60 * 60 * 24);
             const formattedLastTxDate = lastTxDate.toLocaleDateString();
-            newResults[5] = {
+            newResults[6] = {
               title: 'Last Transaction Date',
               status: daysSinceLastTx >= 90 ? 'error' : daysSinceLastTx > 30 ? 'warning' : 'success',
               message: daysSinceLastTx >= 90
@@ -1445,7 +1449,7 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
             };
           } else {
             // API error or other issue - nonce > 0 but couldn't get transaction date
-            newResults[5] = {
+            newResults[6] = {
               title: 'Last Transaction Date',
               status: 'warning',
               message: 'Could not determine last transaction date'
@@ -1462,21 +1466,21 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
 
           if (errorOwners.length === owners.length) {
             // All owners had errors, likely due to missing API key or unsupported chain
-            newResults[10] = {
+            newResults[11] = {
               title: 'Owner Activity Analysis',
               status: 'warning',
               message: 'Could not analyze owner activity (Explorer API key required)'
             };
           } else if (activeOwners.length === 0) {
             // All owners are inactive (good)
-            newResults[10] = {
+            newResults[11] = {
               title: 'Owner Activity Analysis',
               status: 'success',
               message: `All ${inactiveOwners.length} owner${inactiveOwners.length === 1 ? '' : 's'} may be used exclusively for multisig signing (no recent non-multisig transactions).`
             };
           } else {
             // Some owners are active (not ideal)
-            newResults[10] = {
+            newResults[11] = {
               title: 'Owner Activity Analysis',
               status: 'warning',
               message: (
@@ -1520,13 +1524,13 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
           if (typeof guardResult === 'object' && guardResult !== null && 'error' in guardResult) {
             // Handle different types of errors
             if (guardResult.error === 'UNSUPPORTED_VERSION') {
-              newResults[7] = {
+              newResults[8] = {
                 title: 'Transaction Guard',
                 status: 'warning',
                 message: 'Could not check transaction guard status (Safe version too old for Safe SDK support)'
               };
             } else {
-              newResults[7] = {
+              newResults[8] = {
                 title: 'Transaction Guard',
                 status: 'warning',
                 message: 'Could not check transaction guard status (requires Safe SDK support)'
@@ -1534,14 +1538,14 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
             }
           } else if (guardResult === '0x0000000000000000000000000000000000000000' || guardResult === '') {
             // No guard enabled (good)
-            newResults[7] = {
+            newResults[8] = {
               title: 'Transaction Guard',
               status: 'success',
               message: 'No transaction guard enabled. Uses standard Safe transaction execution.'
             };
           } else {
             // Guard enabled (warning - requires review)
-            newResults[7] = {
+            newResults[8] = {
               title: 'Transaction Guard',
               status: 'warning',
               message: (
@@ -1578,13 +1582,13 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
           if (typeof fallbackHandlerResult === 'object' && fallbackHandlerResult !== null && 'error' in fallbackHandlerResult) {
             // Handle different types of errors
             if (fallbackHandlerResult.error === 'UNSUPPORTED_VERSION') {
-              newResults[8] = {
+              newResults[9] = {
                 title: 'Fallback Handler',
                 status: 'warning',
                 message: 'Could not check fallback handler status (Safe version too old for Safe SDK support)'
               };
             } else {
-              newResults[8] = {
+              newResults[9] = {
                 title: 'Fallback Handler',
                 status: 'warning',
                 message: 'Could not check fallback handler status (requires Safe SDK support)'
@@ -1592,7 +1596,7 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
             }
           } else if (fallbackHandlerResult === '0x0000000000000000000000000000000000000000' || fallbackHandlerResult === '') {
             // No fallback handler enabled (good)
-            newResults[8] = {
+            newResults[9] = {
               title: 'Fallback Handler',
               status: 'success',
               message: 'No fallback handler enabled. Uses standard Safe functionality only.'
@@ -1603,7 +1607,7 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
 
             if (handlerName) {
               // Known official fallback handler (good)
-              newResults[8] = {
+              newResults[9] = {
                 title: 'Fallback Handler',
                 status: 'success',
                 message: (
@@ -1627,7 +1631,7 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
               };
             } else {
               // Unknown fallback handler (warning - requires review)
-              newResults[8] = {
+              newResults[9] = {
                 title: 'Fallback Handler',
                 status: 'warning',
                 message: (
@@ -1663,21 +1667,21 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
 
           if (totalDeployments === 0) {
             // Should not happen as we already verified the contract exists
-            newResults[9] = {
+            newResults[10] = {
               title: 'Chain Configuration',
               status: 'error',
               message: 'Could not verify Safe deployment on any chain'
             };
           } else if (totalDeployments === 1) {
             // Safe only deployed on one chain (good)
-            newResults[9] = {
+            newResults[10] = {
               title: 'Chain Configuration',
               status: 'success',
               message: `Safe is deployed only on ${selectedChain.name}. No multi-chain deployment detected.`
             };
 
             // Skip Multi-Chain Signer Analysis for single-chain deployments
-            newResults[13] = {
+            newResults[14] = {
               title: 'Multi-Chain Signer Analysis',
               status: 'success',
               message: 'Not applicable - Safe is only deployed on one chain.'
@@ -1685,7 +1689,7 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
           } else {
             // Safe deployed on multiple chains (warning - replay risk)
             const chainNames = deployedChains.map(chain => chain.name).join(', ');
-            newResults[9] = {
+            newResults[10] = {
               title: 'Chain Configuration',
               status: 'warning',
               message: (
@@ -1700,7 +1704,7 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
             };
 
             // Trigger multi-chain signer reuse analysis
-            newResults[13] = {
+            newResults[14] = {
               title: 'Multi-Chain Signer Analysis',
               status: 'loading',
               message: 'Analyzing signer reuse across chains...'
@@ -1713,14 +1717,14 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
 
                 if (reusedSigners.length === 0) {
                   // No signer reuse detected (good)
-                  updatedResults[13] = {
+                  updatedResults[14] = {
                     title: 'Multi-Chain Signer Analysis',
                     status: 'success',
                     message: '✅ No signer address appears on different chains. Each chain has unique signers.'
                   };
                 } else {
                   // Signer reuse detected (warning)
-                  updatedResults[13] = {
+                  updatedResults[14] = {
                     title: 'Multi-Chain Signer Analysis',
                     status: 'warning',
                     message: (
@@ -1755,7 +1759,7 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
               console.error('Multi-chain signer analysis failed:', error);
               setResults(currentResults => {
                 const updatedResults = [...currentResults];
-                updatedResults[13] = {
+                updatedResults[14] = {
                   title: 'Multi-Chain Signer Analysis',
                   status: 'error',
                   message: 'Could not analyze signer reuse across chains'
@@ -1780,6 +1784,24 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
         });
       });
 
+      // Update Signing Speed Analysis - render the SpeedTest component
+      setResults(currentResults => {
+        const newResults = [...currentResults];
+        newResults[0] = {
+          title: 'Signing Speed Analysis',
+          status: 'success',
+          message: (
+            <SpeedTest 
+              address={addressToAnalyze} 
+              chainId={selectedChain.id} 
+              chainName={selectedChain.name}
+              explorerUrl={selectedChain.explorerUrl}
+            />
+          )
+        };
+        return newResults;
+      });
+
       // Update Emergency Recovery Mechanisms when ready
       recoveryPromise.then(({ hasRecoveryModule, recoveryModules, recoveryThreshold, normalThreshold, thresholdComparison }) => {
         setResults(currentResults => {
@@ -1787,7 +1809,7 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
 
           if (!hasRecoveryModule) {
             // No recovery module (neutral - not necessarily bad)
-            newResults[11] = {
+            newResults[12] = {
               title: 'Emergency Recovery Mechanisms',
               status: 'warning',
               message: 'No recovery module detected. Consider implementing social recovery or guardian mechanisms for emergency access.'
@@ -1796,7 +1818,7 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
             // Recovery module exists - assess configuration
             if (thresholdComparison === 'lower') {
               // Recovery threshold is lower than normal - potential security risk
-              newResults[11] = {
+              newResults[12] = {
                 title: 'Emergency Recovery Mechanisms',
                 status: 'error',
                 message: (
@@ -1835,7 +1857,7 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
               };
             } else if (thresholdComparison === 'equal') {
               // Recovery threshold equals normal - reasonable
-              newResults[11] = {
+              newResults[12] = {
                 title: 'Emergency Recovery Mechanisms',
                 status: 'success',
                 message: (
@@ -1865,7 +1887,7 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
               };
             } else if (thresholdComparison === 'higher') {
               // Recovery threshold is higher - very secure
-              newResults[11] = {
+              newResults[12] = {
                 title: 'Emergency Recovery Mechanisms',
                 status: 'success',
                 message: (
@@ -1896,7 +1918,7 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
               };
             } else {
               // Unknown threshold comparison
-              newResults[11] = {
+              newResults[12] = {
                 title: 'Emergency Recovery Mechanisms',
                 status: 'warning',
                 message: (
@@ -1937,7 +1959,7 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
         console.error('Error checking recovery mechanisms:', error);
         setResults(currentResults => {
           const newResults = [...currentResults];
-          newResults[11] = {
+          newResults[12] = {
             title: 'Emergency Recovery Mechanisms',
             status: 'warning',
             message: 'Could not check recovery mechanisms'
@@ -1953,7 +1975,7 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
 
           if (contractSigners.length === 0) {
             // All signers are EOAs (good)
-            newResults[12] = {
+            newResults[13] = {
               title: 'Contract Signers',
               status: 'success',
               message: 'No multisig signers are contracts. All signers are externally owned accounts (EOAs).'
@@ -1964,7 +1986,7 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
               ? contractSigners.slice(0, 3).join(', ') + ` and ${contractSigners.length - 3} more`
               : contractSigners.join(', ');
 
-            newResults[12] = {
+            newResults[13] = {
               title: 'Contract Signers',
               status: 'warning',
               message: `${contractSigners.length} signer${contractSigners.length === 1 ? '' : 's'} ${contractSigners.length === 1 ? 'is a contract' : 'are contracts'}, not EOA${contractSigners.length === 1 ? '' : 's'}. Need to recursively check those signers. Contract signers: ${contractList}`
@@ -2302,6 +2324,22 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
           {results
             .filter(result => result && result.status && result.title)
             .map((result, index) => {
+
+              // Special rendering for Signing Speed Analysis - it renders its own container
+              if (result.title === 'Signing Speed Analysis') {
+                return (
+                  <div key={index}>
+                    {result.status === 'loading' ? (
+                      <div className="flex items-center gap-3 p-4 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-secondary)]">
+                        <Loader2 className="h-5 w-5 animate-spin text-[var(--color-primary)]" />
+                        <span className="text-sm text-[var(--color-text-secondary)]">Analyzing signing speed...</span>
+                      </div>
+                    ) : (
+                      result.message
+                    )}
+                  </div>
+                );
+              }
 
             const tooltipInfo = getTooltipInfo(result.title);
             const isTooltipOpen = openTooltip === index;
