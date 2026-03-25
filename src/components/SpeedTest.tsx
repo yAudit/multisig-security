@@ -395,19 +395,25 @@ export function SpeedTest({ address, chainId, chainName, explorerUrl }: SpeedTes
                     Sigs
                   </th>
                   <th className="px-3 py-2 text-center text-xs font-semibold uppercase text-[var(--color-text-tertiary)]">
-                    API
+                    Used API
+                  </th>
+                  <th className="px-3 py-2 text-center text-xs font-semibold uppercase text-[var(--color-text-tertiary)]">
+                    Sig Types
                   </th>
                   <th className="px-3 py-2 text-right text-xs font-semibold uppercase text-[var(--color-text-tertiary)]">
                     Duration
                   </th>
                   <th className="px-3 py-2 text-right text-xs font-semibold uppercase text-[var(--color-text-tertiary)]">
-                    Min Gap
+                    <span title="Shortest gap between any two consecutive signatures. N/A for thresholds ≤ 2. A very short min gap suggests one operator signing with multiple keys.">
+                      Min Gap
+                    </span>
                   </th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-[var(--color-border)]">
                 {result.transactions.map((tx, index) => {
                   const txSpeed = getSpeedClass(tx.duration_seconds);
+                  const hasNonStandardSigs = tx.non_standard_sig_types.length > 0;
                   return (
                     <tr key={tx.safe_tx_hash} className="hover:bg-black/5">
                       <td className="px-3 py-2 text-sm text-[var(--color-text-tertiary)]">
@@ -426,13 +432,33 @@ export function SpeedTest({ address, chainId, chainName, explorerUrl }: SpeedTes
                         </a>
                       </td>
                       <td className="px-3 py-2 text-sm text-[var(--color-text-secondary)]">
-                        {tx.num_confirmations}/{tx.confirmations_required}
+                        {tx.nonce}
+                      </td>
+                      <td className="px-3 py-2 text-sm text-[var(--color-text-secondary)]">
+                        {tx.num_confirmations}
                       </td>
                       <td className="px-3 py-2 text-center">
                         {tx.used_safe_api ? (
                           <CheckCircle className="inline-block h-4 w-4 text-[var(--color-success)]" />
                         ) : (
                           <XCircle className="inline-block h-4 w-4 text-[var(--color-error)]" />
+                        )}
+                      </td>
+                      <td className="px-3 py-2 text-center">
+                        {hasNonStandardSigs ? (
+                          <span
+                            className="inline-flex items-center gap-1 text-[var(--color-warning)]"
+                            title={tx.non_standard_sig_types.join(', ')}
+                          >
+                            <AlertTriangle className="h-4 w-4 shrink-0" />
+                            <span className="text-xs font-medium">
+                              {tx.non_standard_sig_types
+                                .map(t => t === 'CONTRACT_SIGNATURE' ? 'Contract' : t === 'APPROVED_HASH' ? 'OnChain' : t)
+                                .join(', ')}
+                            </span>
+                          </span>
+                        ) : (
+                          <span className="text-xs text-[var(--color-text-tertiary)]">Standard</span>
                         )}
                       </td>
                       <td className={cn(
@@ -442,7 +468,7 @@ export function SpeedTest({ address, chainId, chainName, explorerUrl }: SpeedTes
                         {tx.duration_formatted}
                       </td>
                       <td className={cn(
-                        "px-3 py-2 text-right text-sm",
+                        "px-3 py-2 text-right text-sm font-semibold",
                         tx.min_gap_seconds !== null
                           ? getMinGapClass(tx.min_gap_seconds)
                           : "text-[var(--color-text-tertiary)]"

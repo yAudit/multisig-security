@@ -1,14 +1,14 @@
 'use client';
 
 import React, { useState, useMemo, useCallback, useEffect } from 'react';
-import { createPublicClient, http, isAddress } from 'viem';
+import { createPublicClient, http, isAddress, getAddress } from 'viem';
 import { multicall } from 'viem/actions';
 import Safe from '@safe-global/protocol-kit';
 import { GNOSIS_SAFE_ABI, OFFICIAL_SAFE_FALLBACK_HANDLERS, SENTINEL_MODULES_ADDRESS } from '../constants/contracts';
 import { SUPPORTED_CHAINS, DEFAULT_CHAIN, CHAIN_ID_MAP, CHAIN_EXAMPLES, type ChainConfig } from '../constants/chains';
 import { getTooltipInfo } from '../constants/tooltips';
-import { Search, Share2, Info, CheckCircle, AlertTriangle, XCircle, Loader2, Zap } from 'lucide-react';
-import { cn } from '@/lib/utils';
+import { Search, Share2, Info, CheckCircle, AlertTriangle, XCircle, Loader2, Zap, ChevronDown, ShieldAlert, Shield } from 'lucide-react';
+import { cn, truncateHash } from '@/lib/utils';
 import { SpeedTest } from './SpeedTest';
 
 // Extended Error type for RPC failures
@@ -30,7 +30,126 @@ interface SecurityScore {
   rating: 'High Risk' | 'Medium Risk' | 'Low Risk';
   color: string;
   description: string;
+  rawScore: number; // 0-100 base score
+  penalties: { title: string; points: number; isCritical: boolean }[];
+  criticalCount: number;
 }
+
+// Test penalty configuration - Algorithm 2: Cumulative Risk Penalty
+interface PenaltyConfig {
+  error: number;    // Points lost for error
+  warning: number;  // Points lost for warning
+  isCritical: boolean;
+  description: string;
+}
+
+const TEST_PENALTIES: Record<string, PenaltyConfig> = {
+  // CRITICAL: Core security controls - significant but not massive penalties
+  'Threshold': { 
+    error: 20, 
+    warning: 10, 
+    isCritical: true,
+    description: 'Number of signatures required to execute transactions'
+  },
+  'Owner Count': { 
+    error: 18, 
+    warning: 9, 
+    isCritical: true,
+    description: 'Total number of owners in the multisig'
+  },
+  'Fallback Handler': { 
+    error: 14, 
+    warning: 6, 
+    isCritical: false,
+    description: 'Handles token callbacks and fallback operations'
+  },
+  'Proxy Implementation': {
+    error: 18,
+    warning: 8,
+    isCritical: true,
+    description: 'The underlying Safe contract implementation'
+  },
+  
+  // HIGH: Important security features - moderate penalties  
+  'Guard': { 
+    error: 12, 
+    warning: 5, 
+    isCritical: false,
+    description: 'Transaction guard for additional checks'
+  },
+  'Modules': { 
+    error: 12, 
+    warning: 5, 
+    isCritical: false,
+    description: 'Extensions that can execute transactions'
+  },
+  'Contract Version': { 
+    error: 10, 
+    warning: 4, 
+    isCritical: false,
+    description: 'Safe singleton contract version'
+  },
+  'Signing Speed Analysis': { 
+    error: 16, 
+    warning: 8, 
+    isCritical: false,
+    description: 'Time between first and last signature (Heavily weighted - indicates potential centralization)'
+  },
+  
+  // STANDARD: Other checks - smaller penalties
+  'Owner Balance': { 
+    error: 6, 
+    warning: 3, 
+    isCritical: false,
+    description: 'ETH balance of owner addresses'
+  },
+  'Duplicate Owners': { 
+    error: 6, 
+    warning: 3, 
+    isCritical: false,
+    description: 'Check for duplicate owner addresses'
+  },
+  'Etherscan Verification': { 
+    error: 4, 
+    warning: 2, 
+    isCritical: false,
+    description: 'Contract source code verification'
+  },
+  
+  // LOW IMPACT: Informational checks - minimal penalties
+  'Emergency Recovery Mechanisms': { 
+    error: 2, 
+    warning: 1, 
+    isCritical: false,
+    description: 'Recovery modules for emergency access'
+  },
+  'Transaction Guard': { 
+    error: 2, 
+    warning: 1, 
+    isCritical: false,
+    description: 'Transaction guard for additional validation'
+  },
+  'Contract Signers': { 
+    error: 2, 
+    warning: 1, 
+    isCritical: false,
+    description: 'Check if signers are smart contracts'
+  },
+  'Chain Configuration': { 
+    error: 2, 
+    warning: 1, 
+    isCritical: false,
+    description: 'Multi-chain deployment check'
+  },
+};
+
+// Default penalty for unknown tests
+const DEFAULT_PENALTY: PenaltyConfig = { 
+  error: 8, 
+  warning: 4, 
+  isCritical: false,
+  description: 'Security check'
+};
 
 
 // Global Etherscan API rate limiter - 5 requests per second limit
@@ -80,7 +199,9 @@ class EtherscanRateLimiter {
 // Global instance to be used across all Etherscan API calls
 const etherscanRateLimiter = new EtherscanRateLimiter();
 
-// Security score calculation with lenient scoring for warnings
+// Algorithm 2: Cumulative Risk Penalty
+// Start at 100, subtract penalties based on test failures
+// Critical failures have higher penalties and compound
 const calculateSecurityScore = (checks: SecurityCheck[]): SecurityScore => {
   // Safety check for null/undefined checks array
   if (!checks || !Array.isArray(checks)) {
@@ -88,8 +209,11 @@ const calculateSecurityScore = (checks: SecurityCheck[]): SecurityScore => {
       position: 0,
       rating: 'High Risk',
       color: 'text-red-600',
-      description: 'Analysis in progress...'
-    } as SecurityScore;
+      description: 'Analysis in progress...',
+      rawScore: 0,
+      penalties: [],
+      criticalCount: 0
+    };
   }
 
   const completedChecks = checks.filter(check => check && check.status && check.status !== 'loading');
@@ -99,59 +223,91 @@ const calculateSecurityScore = (checks: SecurityCheck[]): SecurityScore => {
       position: 0,
       rating: 'High Risk',
       color: 'text-red-600',
-      description: 'Analysis in progress...'
+      description: 'Analysis in progress...',
+      rawScore: 0,
+      penalties: [],
+      criticalCount: 0
     };
   }
 
-  let totalPoints = 0;
-  let maxPoints = 0;
+  let score = 100;
+  let criticalFailures = 0;
+  let criticalWarnings = 0;
+  const penalties: { title: string; points: number; isCritical: boolean }[] = [];
 
   completedChecks.forEach(check => {
-    maxPoints += 10; // Each check is worth 10 points
-
-    switch (check.status) {
-      case 'success':
-        totalPoints += 10; // Full points for green
-        break;
-      case 'warning':
-        totalPoints += 7; // 70% points for yellow (lenient)
-        break;
-      case 'error':
-        totalPoints += 0; // No points for red
-        break;
+    const config = TEST_PENALTIES[check.title] || DEFAULT_PENALTY;
+    
+    if (check.status === 'error') {
+      score -= config.error;
+      penalties.push({ title: check.title, points: config.error, isCritical: config.isCritical });
+      if (config.isCritical) criticalFailures++;
+    } else if (check.status === 'warning') {
+      score -= config.warning;
+      penalties.push({ title: check.title, points: config.warning, isCritical: config.isCritical });
+      if (config.isCritical) criticalWarnings++;
     }
   });
 
-  const score = Math.round((totalPoints / maxPoints) * 100);
+  // Compounding penalty for multiple critical issues (more lenient)
+  const totalCriticalIssues = criticalFailures + criticalWarnings;
+  if (totalCriticalIssues >= 3) {
+    score -= 8; // Small additional penalty for 3+ critical issues
+    penalties.push({ title: 'Multiple Critical Issues', points: 8, isCritical: true });
+  }
+  if (totalCriticalIssues >= 5) {
+    score -= 10; // Additional penalty for 5+ critical issues
+    penalties.push({ title: 'Severe Critical Issues', points: 10, isCritical: true });
+  }
 
-  // Map score to position on the bar (0-100)
-  // Red zone: 0-33, Yellow zone: 33-66, Green zone: 66-100
-  let position = score;
+  // Clamp score between 0-100
+  const rawScore = Math.max(0, Math.min(100, score));
 
-  // Three-tier system matching the colored segments on the slider
-  if (score >= 70) {
-    position = Math.min(95, 70 + (score - 70) * 0.83); // Map 70-100 to 70-95 in green zone
+  // Calculate position on slider (0-100)
+  // Use a curve that emphasizes the difference between good and bad scores
+  let position: number;
+  if (rawScore >= 65) {
+    // Good scores: 65-100 maps to 66-95 (Low Risk threshold lowered from 80 to 65)
+    position = 66 + (rawScore - 65) * 0.83;
+  } else if (rawScore >= 40) {
+    // Medium scores: 40-64 maps to 33-65 (Medium Risk threshold lowered from 50 to 40)
+    position = 33 + (rawScore - 40) * 1.28;
+  } else {
+    // Poor scores: 0-39 maps to 5-32
+    position = 5 + rawScore * 0.72;
+  }
+  position = Math.max(5, Math.min(95, position));
+
+  // Determine rating based on raw score (more lenient thresholds)
+  if (rawScore >= 65) {
     return {
       position,
       rating: 'Low Risk',
       color: 'text-green-600',
-      description: 'Your Safe follows security best practices with minimal issues.'
+      description: 'Your Safe follows security best practices with minimal issues.',
+      rawScore,
+      penalties: penalties.sort((a, b) => b.points - a.points),
+      criticalCount: totalCriticalIssues
     };
-  } else if (score >= 50) {
-    position = 35 + (score - 50) * 1.55; // Map 50-69 to 35-66 in yellow zone
+  } else if (rawScore >= 40) {
     return {
       position,
       rating: 'Medium Risk',
       color: 'text-yellow-600',
-      description: 'Your Safe has moderate security risks that should be addressed.'
+      description: 'Your Safe has moderate security risks that should be addressed.',
+      rawScore,
+      penalties: penalties.sort((a, b) => b.points - a.points),
+      criticalCount: totalCriticalIssues
     };
   } else {
-    position = Math.max(5, score * 0.6); // Map 0-49 to 5-30 in red zone
     return {
       position,
       rating: 'High Risk',
       color: 'text-red-600',
-      description: 'Your Safe has significant security risks that need immediate attention.'
+      description: 'Your Safe has significant security risks that need immediate attention.',
+      rawScore,
+      penalties: penalties.sort((a, b) => b.points - a.points),
+      criticalCount: totalCriticalIssues
     };
   }
 };
@@ -181,6 +337,7 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
   const [showShareToast, setShowShareToast] = useState(false);
   const [isToastFading, setIsToastFading] = useState(false);
   const [chainChanged, setChainChanged] = useState(false);
+  const [selectedExample, setSelectedExample] = useState('');
 
   // Memoize security score calculation
   const securityScore = useMemo(() => {
@@ -318,10 +475,10 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
     // Check if version matches latest
     if (version === latestVersion) return 'latest';
 
-    // Check if version matches second latest AND latest release is less than 180 days old
+    // Check if version matches second latest AND latest release is less than 365 days old
     if (secondLatestVersion && version === secondLatestVersion && latestReleaseDate) {
       const daysSinceLatestRelease = (Date.now() - latestReleaseDate.getTime()) / (1000 * 60 * 60 * 24);
-      if (daysSinceLatestRelease < 180) {
+      if (daysSinceLatestRelease < 365) {
         return 'second-latest'; // Return distinct status for second latest
       }
     }
@@ -1193,6 +1350,71 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
     };
   };
 
+  // Helper function to fetch signing speed data for status determination
+  const fetchSigningSpeedData = async (address: string, chainId: number): Promise<{ avgDuration: number | null; error?: string }> => {
+    const SAFE_API_URLS: Record<number, string> = {
+      1: 'https://safe-transaction-mainnet.safe.global',
+      56: 'https://safe-transaction-bsc.safe.global',
+      137: 'https://safe-transaction-polygon.safe.global',
+      42161: 'https://safe-transaction-arbitrum.safe.global',
+      10: 'https://safe-transaction-optimism.safe.global',
+      8453: 'https://safe-transaction-base.safe.global',
+      747474: 'https://safe-transaction-katana.safe.global',
+    };
+
+    const baseUrl = SAFE_API_URLS[chainId];
+    if (!baseUrl) {
+      return { avgDuration: null, error: 'Unsupported chain' };
+    }
+
+    try {
+      // Properly checksum the address for Safe API
+      const checksummedAddress = getAddress(address.toLowerCase());
+      const url = `${baseUrl}/api/v1/safes/${checksummedAddress}/multisig-transactions/?executed=true&limit=10&ordering=-executionDate`;
+      const response = await fetch(url, { headers: { Accept: 'application/json' } });
+      
+      if (!response.ok) {
+        return { avgDuration: null, error: `API error: ${response.status}` };
+      }
+
+      const data = await response.json();
+      const transactions = data.results || [];
+
+      if (!transactions.length) {
+        return { avgDuration: null, error: 'No executed transactions found' };
+      }
+
+      let totalDuration = 0;
+      let validTxCount = 0;
+
+      for (const tx of transactions) {
+        const confirmations = tx.confirmations || [];
+        if (!confirmations.length) continue;
+
+        const sorted = [...confirmations].sort((a, b) => 
+          (a.submissionDate || '').localeCompare(b.submissionDate || '')
+        );
+
+        const firstTime = sorted[0].submissionDate ? new Date(sorted[0].submissionDate).getTime() : null;
+        const lastTime = sorted[sorted.length - 1].submissionDate ? new Date(sorted[sorted.length - 1].submissionDate).getTime() : null;
+        
+        if (firstTime && lastTime && !isNaN(firstTime) && !isNaN(lastTime)) {
+          const durationSeconds = (lastTime - firstTime) / 1000;
+          totalDuration += durationSeconds;
+          validTxCount++;
+        }
+      }
+
+      if (validTxCount === 0) {
+        return { avgDuration: null, error: 'No valid transaction timing data' };
+      }
+
+      return { avgDuration: totalDuration / validTxCount };
+    } catch (error) {
+      return { avgDuration: null, error: error instanceof Error ? error.message : 'Unknown error' };
+    }
+  };
+
   const performAnalysis = useCallback(async (addressToAnalyze: string) => {
     setLoading(true);
     setError('');
@@ -1229,6 +1451,9 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
       ];
 
       setResults(initialResults);
+      
+      // Show results immediately while individual checks load in background
+      setLoading(false);
 
       // Fetch latest Safe version info and update Safe Version status
       const versionInfoPromise = getSafeVersionInfo();
@@ -1784,22 +2009,47 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
         });
       });
 
-      // Update Signing Speed Analysis - render the SpeedTest component
-      setResults(currentResults => {
-        const newResults = [...currentResults];
-        newResults[0] = {
-          title: 'Signing Speed Analysis',
-          status: 'success',
-          message: (
-            <SpeedTest 
-              address={addressToAnalyze} 
-              chainId={selectedChain.id} 
-              chainName={selectedChain.name}
-              explorerUrl={selectedChain.explorerUrl}
-            />
-          )
-        };
-        return newResults;
+      // Update Signing Speed Analysis - fetch data first to determine status, then render
+      fetchSigningSpeedData(addressToAnalyze, selectedChain.id).then(speedData => {
+        setResults(currentResults => {
+          const newResults = [...currentResults];
+          
+          if (speedData.error) {
+            // Error fetching data
+            newResults[0] = {
+              title: 'Signing Speed Analysis',
+              status: 'warning',
+              message: `Could not analyze signing speed: ${speedData.error}`
+            };
+          } else if (speedData.avgDuration !== null) {
+            // Determine status based on average duration
+            // < 10 min = error (too fast), < 6 hours = warning, >= 6 hours = success
+            const status = speedData.avgDuration < 600 ? 'error' : 
+                          speedData.avgDuration < 21600 ? 'warning' : 'success';
+            
+            newResults[0] = {
+              title: 'Signing Speed Analysis',
+              status,
+              message: (
+                <SpeedTest 
+                  address={addressToAnalyze} 
+                  chainId={selectedChain.id} 
+                  chainName={selectedChain.name}
+                  explorerUrl={selectedChain.explorerUrl}
+                />
+              )
+            };
+          } else {
+            // No data available
+            newResults[0] = {
+              title: 'Signing Speed Analysis',
+              status: 'warning',
+              message: 'No transaction data available for signing speed analysis'
+            };
+          }
+          
+          return newResults;
+        });
       });
 
       // Update Emergency Recovery Mechanisms when ready
@@ -2100,33 +2350,7 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
     }, 1500);
   };
 
-  const getStatusColor = (status: 'success' | 'warning' | 'error' | 'loading') => {
-    switch (status) {
-      case 'success':
-        return 'bg-green-100 border-green-500 text-green-800';
-      case 'warning':
-        return 'bg-yellow-100 border-yellow-500 text-yellow-800';
-      case 'error':
-        return 'bg-red-100 border-red-500 text-red-800';
-      case 'loading':
-        return 'bg-blue-100 border-blue-500 text-blue-800';
-    }
-  };
 
-  const getStatusIcon = (status: 'success' | 'warning' | 'error' | 'loading') => {
-    switch (status) {
-      case 'success':
-        return '✓';
-      case 'warning':
-        return '⚠';
-      case 'error':
-        return '✗';
-      case 'loading':
-        return (
-          <div className="inline-block animate-spin rounded-full h-4 w-4 border-b-2 border-blue-600"></div>
-        );
-    }
-  };
 
   const handleExampleClick = useCallback(async (exampleAddress: string) => {
     setAddress(exampleAddress);
@@ -2148,185 +2372,325 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
 
 
   return (
-    <div className="bg-white rounded-lg shadow-lg p-4 sm:p-8">
-      <div className="mb-4 sm:mb-8">
-        <div className="flex flex-col sm:flex-row gap-4 mb-4">
-          <div className="flex-1">
-            <label htmlFor="address" className="block text-sm font-medium text-gray-700 mb-2">
+    <div>
+      <div className="mb-4 sm:mb-8 space-y-6">
+        <div className="grid gap-6 sm:grid-cols-[1fr,auto]">
+          <div className="space-y-2">
+            <label htmlFor="address" className="block text-sm font-medium text-[var(--color-text-primary)]">
               Multisig Address
             </label>
-            <input
-              type="text"
-              id="address"
-              value={address}
-              onChange={(e) => {
-                setAddress(e.target.value);
-                if (chainChanged) setChainChanged(false);
-              }}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter' && !loading) {
-                  analyzeMultisig();
-                }
-              }}
-              placeholder="0x..."
-              className="w-full px-4 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-gray-900 placeholder-gray-500"
-            />
+            <div className="relative">
+              <Search className="absolute left-3 top-1/2 h-5 w-5 -translate-y-1/2 text-[var(--color-text-tertiary)]" />
+              <input
+                type="text"
+                id="address"
+                value={address}
+                onChange={(e) => {
+                  setAddress(e.target.value);
+                  if (chainChanged) setChainChanged(false);
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && !loading) {
+                    analyzeMultisig();
+                  }
+                }}
+                placeholder="0x..."
+                className={cn(
+                  "w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] pl-10 pr-4 py-3 shadow-sm",
+                  "text-[var(--color-text-primary)] placeholder:text-[var(--color-text-tertiary)]",
+                  "focus:border-[var(--color-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]/20 focus:shadow-md",
+                  "hover:border-[var(--color-border-hover)]",
+                  "font-mono text-sm transition-all duration-200"
+                )}
+              />
+            </div>
           </div>
-          <div className="sm:w-48">
-            <label htmlFor="chain" className="block text-sm font-medium text-gray-700 mb-2">
+          <div className="space-y-2 sm:w-48">
+            <label htmlFor="chain" className="block text-sm font-medium text-[var(--color-text-primary)]">
               Chain
             </label>
-            <select
-              id="chain"
-              value={selectedChain.id}
-              onChange={(e) => {
-                const chainId = parseInt(e.target.value);
-                const chain = SUPPORTED_CHAINS.find(c => c.id === chainId);
-                if (chain) {
-                  setChainChanged(true);
-                  setSelectedChain(chain);
-                  setResults([]); // Clear results when chain changes
-                  setError('');
-                  setAddress(''); // Clear address to show examples for new chain
-                }
-              }}
-              className="w-full px-4 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-gray-900"
-            >
-              {SUPPORTED_CHAINS.map((chain) => (
-                <option key={chain.id} value={chain.id}>
-                  {chain.name}
-                </option>
-              ))}
-            </select>
+            <div className="relative">
+              <select
+                id="chain"
+                value={selectedChain.id}
+                onChange={(e) => {
+                  const chainId = parseInt(e.target.value);
+                  const chain = SUPPORTED_CHAINS.find(c => c.id === chainId);
+                  if (chain) {
+                    setChainChanged(true);
+                    setSelectedChain(chain);
+                    setResults([]);
+                    setError('');
+                    setAddress('');
+                    setSelectedExample('');
+                  }
+                }}
+                className={cn(
+                  "w-full appearance-none rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-4 py-3 pr-10 shadow-sm",
+                  "text-[var(--color-text-primary)]",
+                  "focus:border-[var(--color-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]/20 focus:shadow-md",
+                  "hover:border-[var(--color-border-hover)]",
+                  "transition-all duration-200 cursor-pointer"
+                )}
+              >
+                {SUPPORTED_CHAINS.map((chain) => (
+                  <option key={chain.id} value={chain.id}>
+                    {chain.name}
+                  </option>
+                ))}
+              </select>
+              <svg 
+                className="absolute right-3 top-1/2 h-5 w-5 -translate-y-1/2 text-[var(--color-text-tertiary)] pointer-events-none" 
+                fill="none" 
+                stroke="currentColor" 
+                viewBox="0 0 24 24"
+              >
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+              </svg>
+            </div>
           </div>
         </div>
+
+        {/* Example Select */}
+        {CHAIN_EXAMPLES[selectedChain.id] && CHAIN_EXAMPLES[selectedChain.id].length > 0 && (
+          <div className="space-y-2">
+            <label
+              htmlFor="exampleSelect"
+              className="block text-sm font-medium text-[var(--color-text-primary)]"
+            >
+              Or select an example Safe
+            </label>
+            <div className="relative">
+              <select
+                id="exampleSelect"
+                value={selectedExample}
+                onChange={(e) => {
+                  const value = e.target.value;
+                  setSelectedExample(value);
+                  if (value) {
+                    setAddress(value);
+                  }
+                }}
+                className={cn(
+                  "w-full appearance-none rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-4 py-3 pr-10 shadow-sm",
+                  "text-[var(--color-text-primary)]",
+                  "focus:border-[var(--color-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]/20 focus:shadow-md",
+                  "hover:border-[var(--color-border-hover)]",
+                  "transition-all duration-200 cursor-pointer"
+                )}
+              >
+                <option value="">Choose an example...</option>
+                {CHAIN_EXAMPLES[selectedChain.id].map((example) => (
+                  <option key={example.address} value={example.address}>
+                    {example.name} ({truncateHash(example.address)})
+                  </option>
+                ))}
+              </select>
+              <ChevronDown className="absolute right-3 top-1/2 h-5 w-5 -translate-y-1/2 text-[var(--color-text-tertiary)] pointer-events-none" />
+            </div>
+          </div>
+        )}
+
+        {/* Buttons */}
         <div className="flex gap-3">
           <button
             onClick={analyzeMultisig}
             disabled={loading}
-            className="px-6 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
+            className={cn(
+              "flex-1 rounded-lg px-6 py-3 text-base font-semibold text-white shadow-sm",
+              "bg-[var(--color-primary)] hover:bg-[var(--color-primary-hover)]",
+              "hover:shadow-md active:scale-[0.98]",
+              "focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]/20",
+              "disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-[var(--color-primary)] disabled:hover:shadow-sm",
+              "transition-all duration-200"
+            )}
           >
-            {loading ? 'Analyzing...' : 'Analyze'}
+            {loading ? (
+              <span className="flex items-center justify-center gap-2">
+                <span className="h-5 w-5 animate-spin rounded-full border-2 border-white/30 border-t-white" />
+                Analyzing...
+              </span>
+            ) : (
+              "Analyze Safe"
+            )}
           </button>
           <button
             onClick={handleShare}
             disabled={!address || loading}
-            className="px-6 py-2 bg-gray-600 text-white rounded-md hover:bg-gray-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+            className={cn(
+              "inline-flex items-center gap-2 rounded-lg px-4 py-3 text-base font-medium",
+              "border border-[var(--color-border)] bg-[var(--color-surface)]",
+              "text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-secondary)] hover:text-[var(--color-text-primary)]",
+              "hover:border-[var(--color-border-hover)] active:scale-[0.98]",
+              "focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]/20",
+              "disabled:cursor-not-allowed disabled:opacity-50",
+              "transition-all duration-200"
+            )}
             title="Share analysis link"
           >
-            <svg
-              className="w-4 h-4"
-              fill="currentColor"
-              viewBox="0 0 20 20"
-              xmlns="http://www.w3.org/2000/svg"
-            >
-              <path d="M15 8a3 3 0 1 0-2.977-2.63l-4.94 2.47a3 3 0 1 0 0 4.319l4.94 2.47a3 3 0 1 0 .895-1.789l-4.94-2.47a3.027 3.027 0 0 0 0-.74l4.94-2.47C13.456 7.68 14.19 8 15 8z"/>
-            </svg>
-            Share
+            <Share2 className="h-4 w-4" />
+            <span className="hidden sm:inline">Share</span>
           </button>
         </div>
       </div>
 
-      {showExamples && CHAIN_EXAMPLES[selectedChain.id] && (
-        <div className="mb-4 sm:mb-8 p-3 sm:p-6 bg-gray-50 rounded-lg border">
-          <h3 className="text-lg font-semibold text-gray-900 mb-4">Try these example addresses ({selectedChain.name}):</h3>
-          <div className="space-y-3">
-            {CHAIN_EXAMPLES[selectedChain.id].map((example, index) => (
-              <div key={index} className="flex flex-col sm:flex-row sm:items-center sm:justify-between p-2 sm:p-3 bg-white rounded border hover:bg-blue-50 transition-colors gap-3">
-                <div className="flex-1">
-                  <div className="font-medium text-gray-900 text-sm sm:text-base">{example.name}</div>
-                  <div className="text-xs sm:text-sm text-gray-600 break-all">{example.address}</div>
-                </div>
-                <button
-                  onClick={() => handleExampleClick(example.address)}
-                  className="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 transition-colors w-full sm:w-auto flex-shrink-0"
-                >
-                  Analyze
-                </button>
-              </div>
-            ))}
+      {error && (
+        <div className="mt-6 rounded-lg border border-[var(--color-error)]/30 bg-[var(--color-error-bg)] p-4">
+          <div className="flex items-start gap-3">
+            <XCircle className="mt-0.5 h-5 w-5 shrink-0 text-[var(--color-error)]" />
+            <p className="text-[var(--color-error)]">{error}</p>
           </div>
         </div>
       )}
 
-      {error && (
-        <div className="mb-3 sm:mb-6 p-3 sm:p-4 bg-red-100 border border-red-500 rounded-md">
-          <p className="text-red-800">{error}</p>
-        </div>
-      )}
-
       {loading && (
-        <div className="text-center py-8">
-          <div className="inline-block animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
-          <p className="mt-2 text-gray-600">Analyzing multisig contract...</p>
+        <div className="mt-8 text-center py-12">
+          <Loader2 className="mx-auto h-8 w-8 animate-spin text-[var(--color-primary)]" />
+          <p className="mt-4 text-[var(--color-text-secondary)]">Analyzing multisig contract...</p>
         </div>
       )}
 
       {results.length > 0 && (
-        <div className="space-y-2 sm:space-y-4">
-          <h2 className="text-xl sm:text-2xl font-bold text-gray-900 mb-3 sm:mb-4">Security Analysis Results</h2>
-
-          {/* Security Score Display */}
+        <div className="mt-8 space-y-6">
+          {/* Score Card */}
           {securityScore && (
-            <div className="mb-4 sm:mb-8 p-3 sm:p-6 bg-gradient-to-r from-blue-50 to-indigo-50 rounded-lg border border-blue-200 shadow-sm">
-              <div className="flex flex-col gap">
-                <div className="flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-3 mb-2">
-                  <h3 className="text-lg sm:text-xl font-semibold text-gray-900">Overall Security Rating</h3>
-                  <div className={`inline-flex items-center px-3 py-1 rounded-full text-sm font-medium self-start sm:self-auto ${
-                    securityScore.rating === 'Low Risk' ? 'bg-green-100 text-green-800' :
-                    securityScore.rating === 'Medium Risk' ? 'bg-yellow-100 text-yellow-800' :
-                    'bg-red-100 text-red-800'
-                  }`}>
-                    {securityScore.rating}
-                  </div>
+            <div className="overflow-hidden rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] shadow-sm">
+              <div className="border-b border-[var(--color-border)] bg-[var(--color-surface-secondary)] px-6 py-4">
+                <div className="flex items-center justify-between">
+                  <h2 className="text-lg font-semibold text-[var(--color-text-primary)]">
+                    Security Analysis Results
+                  </h2>
+                  {/* Show loading indicator when some results are still loading */}
+                  {results.some(r => r.status === 'loading') && (
+                    <div className="flex items-center gap-2 text-sm text-[var(--color-text-tertiary)]">
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                      <span>Analyzing...</span>
+                    </div>
+                  )}
                 </div>
-
-                {/* Security Bar with Arrow */}
-                <div className="relative mb-4">
-                  <div className="flex h-8 sm:h-10 rounded-lg overflow-hidden border border-gray-300">
-                    {/* Red Zone */}
-                    <div className="w-1/3 bg-red-400 flex items-center justify-center px-1">
-                      <span className="text-white text-xs sm:text-sm font-medium text-center">
-                        <span className="hidden sm:inline">High Risk</span>
-                        <span className="sm:hidden">High</span>
-                      </span>
+              </div>
+              
+              <div className="p-6 sm:p-8">
+                <div className="text-center">
+                  <p className="mb-2 text-sm font-medium uppercase tracking-wide text-[var(--color-text-tertiary)]">
+                    Overall Security Rating
+                  </p>
+                  <div className="flex items-center justify-center gap-3 mb-6">
+                    <div className={`inline-flex items-center gap-2 rounded-full px-4 py-2 text-sm font-semibold ${
+                      securityScore.rating === 'Low Risk' ? 'bg-[var(--color-success-bg)] text-[var(--color-success)]' :
+                      securityScore.rating === 'Medium Risk' ? 'bg-[var(--color-warning-bg)] text-[var(--color-warning)]' :
+                      'bg-[var(--color-error-bg)] text-[var(--color-error)]'
+                    }`}>
+                      {securityScore.rating === 'Low Risk' && <CheckCircle className="h-4 w-4" />}
+                      {securityScore.rating === 'Medium Risk' && <AlertTriangle className="h-4 w-4" />}
+                      {securityScore.rating === 'High Risk' && <XCircle className="h-4 w-4" />}
+                      {securityScore.rating}
                     </div>
-                    {/* Yellow Zone */}
-                    <div className="w-1/3 bg-yellow-400 flex items-center justify-center px-1">
-                      <span className="text-white text-xs sm:text-sm font-medium text-center">
-                        <span className="hidden sm:inline">Medium Risk</span>
-                        <span className="sm:hidden">Med</span>
-                      </span>
-                    </div>
-                    {/* Green Zone */}
-                    <div className="w-1/3 bg-green-400 flex items-center justify-center px-1">
-                      <span className="text-white text-xs sm:text-sm font-medium text-center">
-                        <span className="hidden sm:inline">Low Risk</span>
-                        <span className="sm:hidden">Low</span>
+                    <div className="inline-flex items-center gap-1.5 rounded-full bg-[var(--color-surface-secondary)] px-3 py-2 text-sm font-medium text-[var(--color-text-primary)]">
+                      <span className="text-[var(--color-text-tertiary)]">Score:</span>
+                      <span className={cn(
+                        securityScore.rawScore >= 65 && "text-[var(--color-success)]",
+                        securityScore.rawScore >= 40 && securityScore.rawScore < 65 && "text-[var(--color-warning)]",
+                        securityScore.rawScore < 40 && "text-[var(--color-error)]"
+                      )}>
+                        {securityScore.rawScore}/100
                       </span>
                     </div>
                   </div>
 
-                  {/* Black Arrow Indicator */}
-                  <div
-                    className="absolute -top-4 sm:-top-5 transform -translate-x-1/2"
-                    style={{ left: `${securityScore.position}%` }}
-                  >
-                    <div className="w-0 h-0 border-l-[10px] border-r-[10px] border-t-[12px] sm:border-l-[12px] sm:border-r-[12px] sm:border-t-[16px] border-l-transparent border-r-transparent border-t-black drop-shadow-sm"></div>
+                  {/* Security Bar */}
+                  <div className="mx-auto max-w-md">
+                    <div className="relative h-3 rounded-full bg-gradient-to-r from-[var(--color-error)] via-[var(--color-warning)] to-[var(--color-success)]">
+                      <div
+                        className="absolute top-1/2 h-6 w-6 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-white bg-[var(--color-surface)] shadow-md transition-all duration-500"
+                        style={{ left: `${securityScore.position}%` }}
+                      />
+                    </div>
+                    <div className="mt-2 flex justify-between text-xs text-[var(--color-text-tertiary)]">
+                      <span>High Risk</span>
+                      <span>Medium</span>
+                      <span>Low Risk</span>
+                    </div>
                   </div>
+
+                  {/* Score Breakdown */}
+                  {securityScore.penalties.length > 0 && (
+                    <div className="mt-6 border-t border-[var(--color-border)] pt-4">
+                      <details className="group">
+                        <summary className="flex cursor-pointer items-center justify-between text-sm font-medium text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)]">
+                          <span>Score Breakdown</span>
+                          <ChevronDown className="h-4 w-4 transition-transform group-open:rotate-180" />
+                        </summary>
+                        <div className="mt-3 space-y-3">
+                          {/* Base Score */}
+                          <div className="flex items-center justify-between text-sm">
+                            <span className="text-[var(--color-text-secondary)]">Base Score</span>
+                            <span className="font-medium text-[var(--color-text-primary)]">100</span>
+                          </div>
+                          
+                          {/* Penalties */}
+                          {securityScore.penalties.map((penalty, idx) => (
+                            <div key={idx} className="flex items-center justify-between text-sm">
+                              <div className="flex items-center gap-2">
+                                <span className="text-[var(--color-text-secondary)]">{penalty.title}</span>
+                                {penalty.isCritical && (
+                                  <span className="rounded bg-[var(--color-error)]/10 px-1.5 py-0.5 text-xs font-medium text-[var(--color-error)]">
+                                    Critical
+                                  </span>
+                                )}
+                              </div>
+                              <span className="font-medium text-[var(--color-error)]">-{penalty.points}</span>
+                            </div>
+                          ))}
+                          
+                          {/* Final Score */}
+                          <div className="flex items-center justify-between border-t border-[var(--color-border)] pt-2 text-sm font-semibold">
+                            <span className="text-[var(--color-text-primary)]">Final Score</span>
+                            <span className={cn(
+                              securityScore.rawScore >= 80 && "text-[var(--color-success)]",
+                              securityScore.rawScore >= 50 && securityScore.rawScore < 80 && "text-[var(--color-warning)]",
+                              securityScore.rawScore < 50 && "text-[var(--color-error)]"
+                            )}>
+                              {securityScore.rawScore}/100
+                            </span>
+                          </div>
+                          
+                          {/* Legend */}
+                          <div className="mt-3 rounded-lg bg-[var(--color-surface-secondary)] p-3 text-xs text-[var(--color-text-secondary)]">
+                            <p className="mb-1 font-medium text-[var(--color-text-primary)]">How scoring works:</p>
+                            <ul className="space-y-1">
+                              <li className="flex items-center gap-1.5">
+                                <ShieldAlert className="h-3 w-3 text-[var(--color-error)]" />
+                                <span><strong>Critical checks</strong> (Threshold, Owner Count, Proxy Implementation): Errors cost 18-20 points</span>
+                              </li>
+                              <li className="flex items-center gap-1.5">
+                                <Shield className="h-3 w-3 text-[var(--color-warning)]" />
+                                <span><strong>Standard checks</strong>: Errors cost 8-15 points</span>
+                              </li>
+                              <li className="flex items-center gap-1.5">
+                                <span className="rounded-full bg-[var(--color-error)]/10 px-1.5 py-0 text-[10px] font-medium text-[var(--color-error)]">x2</span>
+                                <span>Multiple critical issues incur additional penalties</span>
+                              </li>
+                            </ul>
+                          </div>
+                        </div>
+                      </details>
+                    </div>
+                  )}
                 </div>
-
-                <p className="text-gray-600 text-sm">{securityScore.description}</p>
               </div>
             </div>
           )}
 
-          {results
+          {/* Results List */}
+          <div className="space-y-3">
+            {results
             .filter(result => result && result.status && result.title)
             .map((result, index) => {
 
               // Special rendering for Signing Speed Analysis - it renders its own container
               if (result.title === 'Signing Speed Analysis') {
+                const speedPenaltyConfig = TEST_PENALTIES[result.title] || DEFAULT_PENALTY;
                 return (
                   <div key={index}>
                     {result.status === 'loading' ? (
@@ -2335,7 +2699,21 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
                         <span className="text-sm text-[var(--color-text-secondary)]">Analyzing signing speed...</span>
                       </div>
                     ) : (
-                      result.message
+                      <div className={cn(
+                        "rounded-lg border p-4",
+                        result.status === 'success' && "bg-[var(--color-success-bg)] border-[var(--color-success)]/30",
+                        result.status === 'warning' && "bg-[var(--color-warning-bg)] border-[var(--color-warning)]/30",
+                        result.status === 'error' && "bg-[var(--color-error-bg)] border-[var(--color-error)]/30"
+                      )}>
+                        {result.status !== 'success' && (
+                          <div className="mb-2">
+                            <span className="text-xs text-[var(--color-text-tertiary)]">
+                              Score impact: -{result.status === 'error' ? speedPenaltyConfig.error : speedPenaltyConfig.warning} points (Heavily weighted)
+                            </span>
+                          </div>
+                        )}
+                        {result.message}
+                      </div>
                     )}
                   </div>
                 );
@@ -2344,58 +2722,100 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
             const tooltipInfo = getTooltipInfo(result.title);
             const isTooltipOpen = openTooltip === index;
 
+            const penaltyConfig = TEST_PENALTIES[result.title] || DEFAULT_PENALTY;
+
             return (
               <div
                 key={index}
-                className={`p-2 sm:p-4 rounded-md border-l-4 ${getStatusColor(result.status)} relative`}
+                className={cn(
+                  "rounded-lg border p-4 relative",
+                  result.status === 'success' && "bg-[var(--color-success-bg)] border-[var(--color-success)]/30",
+                  result.status === 'warning' && "bg-[var(--color-warning-bg)] border-[var(--color-warning)]/30",
+                  result.status === 'error' && "bg-[var(--color-error-bg)] border-[var(--color-error)]/30",
+                  result.status === 'loading' && "bg-[var(--color-primary-100)] border-[var(--color-primary)]/30"
+                )}
               >
-                <div className="flex items-start">
-                  <div className="text-xl mr-3 flex items-center justify-center w-6 h-6">
-                    {getStatusIcon(result.status)}
+                <div className="flex items-start gap-4">
+                  <div className="flex items-center justify-center w-6 h-6 shrink-0">
+                    {result.status === 'success' && <CheckCircle className="h-5 w-5 text-[var(--color-success)]" />}
+                    {result.status === 'warning' && <AlertTriangle className="h-5 w-5 text-[var(--color-warning)]" />}
+                    {result.status === 'error' && <XCircle className="h-5 w-5 text-[var(--color-error)]" />}
+                    {result.status === 'loading' && <Loader2 className="h-5 w-5 animate-spin text-[var(--color-primary)]" />}
                   </div>
-                  <div className="flex-1">
-                    <div className="flex items-center gap-2">
-                      <h3 className="font-semibold text-base sm:text-lg">{result.title}</h3>
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <h3 className={cn(
+                        "font-semibold",
+                        result.status === 'success' && "text-[var(--color-success)]",
+                        result.status === 'warning' && "text-[var(--color-warning)]",
+                        result.status === 'error' && "text-[var(--color-error)]",
+                        result.status === 'loading' && "text-[var(--color-primary)]"
+                      )}>{result.title}</h3>
+                      
+                      {/* Criticality Badge - only show for critical tests */}
+                      {penaltyConfig.isCritical && (
+                        <span 
+                          className="inline-flex items-center gap-1 rounded-full bg-[var(--color-error)]/10 px-2 py-0.5 text-xs font-medium text-[var(--color-error)]"
+                          title="Critical security check - failures have major impact on score"
+                        >
+                          <ShieldAlert className="h-3 w-3" />
+                          Critical
+                        </span>
+                      )}
+                      
                       <button
                         onClick={() => setOpenTooltip(isTooltipOpen ? null : index)}
-                        className="text-gray-500 hover:text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500 rounded-full p-1 transition-colors"
+                        className={cn(
+                          "focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]/20 rounded-full p-1 transition-colors",
+                          result.status === 'success' && "text-[var(--color-success)]/70 hover:text-[var(--color-success)]",
+                          result.status === 'warning' && "text-[var(--color-warning)]/70 hover:text-[var(--color-warning)]",
+                          result.status === 'error' && "text-[var(--color-error)]/70 hover:text-[var(--color-error)]",
+                          result.status === 'loading' && "text-[var(--color-primary)]/70 hover:text-[var(--color-primary)]"
+                        )}
                         aria-label="Show information"
                       >
-                        <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 20 20">
-                          <path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z" clipRule="evenodd" />
-                        </svg>
+                        <Info className="h-4 w-4" />
                       </button>
                     </div>
-                    <div className="mt-1 min-w-0 text-sm sm:text-base">{result.message}</div>
+                    
+                    {/* Show penalty info for non-success results */}
+                    {result.status !== 'success' && result.status !== 'loading' && (
+                      <div className="mt-1.5 text-xs text-[var(--color-text-tertiary)]">
+                        Score impact: -{result.status === 'error' ? penaltyConfig.error : penaltyConfig.warning} points
+                        {penaltyConfig.isCritical && ' (Critical)'}
+                      </div>
+                    )}
+                    
+                    <div className="mt-1 text-sm text-[var(--color-text-primary)]">{result.message}</div>
 
                     {isTooltipOpen && (
-                      <div className="mt-3 sm:mt-4 p-3 sm:p-4 bg-white border border-gray-300 rounded-lg shadow-lg">
-                        <div className="space-y-2 sm:space-y-3">
+                      <div className="mt-4 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-secondary)] p-4">
+                        <div className="space-y-3">
                           <div>
-                            <h4 className="font-semibold text-gray-900 mb-1">About this check:</h4>
-                            <p className="text-sm text-gray-700">{tooltipInfo.description}</p>
+                            <h4 className="font-semibold text-[var(--color-text-primary)] mb-1">About this check:</h4>
+                            <p className="text-sm text-[var(--color-text-secondary)]">{tooltipInfo.description}</p>
                           </div>
 
                           {tooltipInfo.thresholds.length > 0 && (
                             <div>
-                              <h4 className="font-semibold text-gray-900 mb-2">Status Thresholds:</h4>
+                              <h4 className="font-semibold text-[var(--color-text-primary)] mb-2">Status Thresholds:</h4>
                               <div className="space-y-1">
                                 {tooltipInfo.thresholds.map((threshold, idx) => (
-                                  <div key={idx} className="text-sm">
+                                  <div key={idx} className="text-sm text-[var(--color-text-secondary)]">
                                     <span className="font-medium">{threshold.status}:</span>
-                                    <span className="text-gray-700 ml-1">{threshold.condition}</span>
+                                    <span className="ml-1">{threshold.condition}</span>
                                   </div>
                                 ))}
                               </div>
                             </div>
                           )}
 
-                          <div className="pt-2 border-t border-gray-200">
+                          <div className="pt-2 border-t border-[var(--color-border)]">
                             <a
                               href={tooltipInfo.learnMoreUrl}
                               target="_blank"
                               rel="noopener noreferrer"
-                              className="text-sm text-blue-600 hover:text-blue-800 underline font-medium inline-flex items-center gap-1"
+                              className="text-sm text-[var(--color-primary)] hover:underline font-medium inline-flex items-center gap-1"
                             >
                               Learn more
                               <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -2412,17 +2832,20 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
             );
           })}
         </div>
+        </div>
       )}
 
       {/* Share Toast Notification */}
       {showShareToast && (
-        <div className={`fixed bottom-4 right-4 bg-green-600 text-white px-4 py-3 rounded-lg shadow-lg flex items-center gap-2 z-50 transform transition-all duration-500 ease-in-out ${
+        <div className={cn(
+          "fixed bottom-6 left-1/2 z-50 -translate-x-1/2",
+          "flex items-center gap-2 rounded-lg px-4 py-3 text-sm font-medium shadow-lg",
+          "bg-[var(--color-text-primary)] text-white",
+          "transform transition-all duration-500 ease-in-out",
           isToastFading ? 'opacity-0 translate-y-2' : 'opacity-100 translate-y-0'
-        }`}>
-          <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 20 20">
-            <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
-          </svg>
-          <span className="text-sm font-medium">Share link copied to clipboard!</span>
+        )}>
+          <CheckCircle className="h-4 w-4 text-[var(--color-success)]" />
+          Link copied to clipboard!
         </div>
       )}
     </div>
