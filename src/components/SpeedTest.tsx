@@ -179,7 +179,7 @@ async function fetchAndAnalyzeSafe(address: string, chainId: number): Promise<An
     throw new Error(`Chain ${chainId} not supported for speed test`);
   }
 
-  const checksummedAddress = getAddress(address.toLowerCase());
+  const checksummedAddress = getAddress(address);
   const url = new URL(`${apiUrl}/api/v1/safes/${checksummedAddress}/multisig-transactions/`);
   url.searchParams.append('executed', 'true');
   url.searchParams.append('limit', '10');

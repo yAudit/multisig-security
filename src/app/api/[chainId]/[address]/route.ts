@@ -51,6 +51,13 @@ const EXPLORER_APIS = {
 // GitHub API for latest Safe version
 const GITHUB_API = 'https://api.github.com/repos/safe-global/safe-smart-account/releases';
 
+// Cache for Safe version info (24-hour TTL)
+const safeVersionCache: { latestVersion: string | null; fetchedAt: number } = {
+  latestVersion: null,
+  fetchedAt: 0,
+};
+const SAFE_VERSION_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+
 // Official Safe fallback handlers
 const OFFICIAL_SAFE_FALLBACK_HANDLERS: Record<string, string> = {
   '0xf48f2B2d2a534e402487b3ee7C18c33Aec0Fe5e4': 'CompatibilityFallbackHandler',
@@ -516,13 +523,21 @@ function getApiKey(): string | null {
 // Check Safe version against GitHub releases
 async function checkSafeVersion(version: string): Promise<SecurityCheck> {
   try {
-    const response = await fetch(GITHUB_API);
-    if (!response.ok) throw new Error('GitHub API error');
-    
-    const releases = await response.json();
-    if (!releases || releases.length === 0) throw new Error('No releases found');
+    let latestVersion: string;
 
-    const latestVersion = releases[0].tag_name.replace('v', '');
+    if (safeVersionCache.latestVersion && Date.now() - safeVersionCache.fetchedAt < SAFE_VERSION_CACHE_TTL_MS) {
+      latestVersion = safeVersionCache.latestVersion;
+    } else {
+      const response = await fetch(GITHUB_API);
+      if (!response.ok) throw new Error('GitHub API error');
+
+      const releases = await response.json();
+      if (!releases || releases.length === 0) throw new Error('No releases found');
+
+      latestVersion = releases[0].tag_name.replace('v', '');
+      safeVersionCache.latestVersion = latestVersion;
+      safeVersionCache.fetchedAt = Date.now();
+    }
     
     // Simple version comparison - would need proper semver comparison in production
     const isLatest = version === latestVersion;

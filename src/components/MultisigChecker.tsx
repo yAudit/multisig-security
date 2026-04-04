@@ -152,6 +152,12 @@ const DEFAULT_PENALTY: PenaltyConfig = {
 };
 
 
+// Cache for Safe version info fetched from GitHub (shared across analyses)
+const safeVersionCache: {
+  data: { latestVersion: string | null; secondLatestVersion: string | null; latestReleaseDate: Date | null } | null;
+  fetchedAt: number;
+} = { data: null, fetchedAt: 0 };
+
 // Global Etherscan API rate limiter - 5 requests per second limit
 class EtherscanRateLimiter {
   private queue: (() => Promise<void>)[] = [];
@@ -403,6 +409,15 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
     secondLatestVersion: string | null;
     latestReleaseDate: Date | null;
   }> => {
+    // Return cached result if still fresh (24 hours)
+    const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+    if (
+      safeVersionCache.data &&
+      Date.now() - safeVersionCache.fetchedAt < CACHE_TTL_MS
+    ) {
+      return safeVersionCache.data;
+    }
+
     try {
       const response = await fetch('https://api.github.com/repos/safe-global/safe-smart-account/releases', {
         headers: {
@@ -438,7 +453,10 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
       const secondLatestVersion = validReleases[1] ? validReleases[1].tag_name.replace(/^v/, '') : null;
       const latestReleaseDate = validReleases[0] ? new Date(validReleases[0].published_at) : null;
 
-      return { latestVersion, secondLatestVersion, latestReleaseDate };
+      const result = { latestVersion, secondLatestVersion, latestReleaseDate };
+      safeVersionCache.data = result;
+      safeVersionCache.fetchedAt = Date.now();
+      return result;
     } catch (error) {
       console.error('Error fetching Safe version info:', error);
       return { latestVersion: null, secondLatestVersion: null, latestReleaseDate: null };
@@ -946,14 +964,14 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
       return address;
     } catch (error) {
       if (error instanceof Error && error.name === 'AbortError') {
-        console.error(`⏰ Timeout fetching contract name for ${address}`);
+        console.error(`Timeout fetching contract name for ${address}`);
         // Retry on timeout if we haven't exceeded retry limit
         if (retryCount < 3) {
           // Retrying after timeout
           return await getContractName(address, chain, retryCount + 1);
         }
       } else {
-        console.error(`💥 Error fetching contract name for ${address}:`, error);
+        console.error(`Error fetching contract name for ${address}:`, error);
         // Retry on network errors too
         if (retryCount < 2) {
           // Retrying after error
@@ -1369,7 +1387,7 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
 
     try {
       // Properly checksum the address for Safe API
-      const checksummedAddress = getAddress(address.toLowerCase());
+      const checksummedAddress = getAddress(address);
       const url = `${baseUrl}/api/v1/safes/${checksummedAddress}/multisig-transactions/?executed=true&limit=10&ordering=-executionDate`;
       const response = await fetch(url, { headers: { Accept: 'application/json' } });
       
