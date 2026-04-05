@@ -25,7 +25,7 @@ export default function Home() {
                 Analyze your Safe multisig contract for security best practices.
                 Enter an address to get started. More info in{' '}
                 <a
-                  href="https://blog.electisec.com/multisig-security"
+                  href="https://blog.yaudit.dev/multisig-security"
                   target="_blank"
                   rel="noopener noreferrer"
                   className="text-[var(--color-primary)] hover:underline"
@@ -62,7 +62,7 @@ export default function Home() {
             </p>
             <p>
               <a
-                href="https://github.com/electisec/multisig-security"
+                href="https://github.com/yaudit/multisig-security"
                 target="_blank"
                 rel="noopener noreferrer"
                 className="text-[var(--color-primary)] hover:underline"

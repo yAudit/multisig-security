@@ -1,6 +1,6 @@
 # Multisig Security Checker
 
-Security analyzer for Safe (formerly Gnosis Safe) multisig wallets. Paste a Safe address, choose a network, and get an opinionated security review that highlights risky configurations. Further information about the analysis is available in this post: https://blog.electisec.com/multisig-security.
+Security analyzer for Safe (formerly Gnosis Safe) multisig wallets. Paste a Safe address, choose a network, and get an opinionated security review that highlights risky configurations. Further information about the analysis is available in this post: https://blog.yaudit.dev/multisig-security.
 
 ![Multisig security web app](screenshot.png)
 
