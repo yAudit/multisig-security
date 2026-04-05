@@ -125,7 +125,8 @@ export const CHAIN_EXAMPLES: Record<number, ExampleMultisig[]> = {
     { address: '0x4FF1b9D9ba8558F5EAfCec096318eA0d8b541971', name: 'Origin Finance Guardian Multisig' },
     { address: '0x9fC3dc011b461664c835F2527fffb1169b3C213e', name: 'Ethereum Foundation DeFi Multisig' },
     { address: '0xac140648435d03f784879cd789130f22ef588fcd', name: 'Aave Chan Initiative Multisig' },
-    { address: '0xcBa28b38103307Ec8dA98377ffF9816C164f9AFa', name: 'Morpho DAO Multisig' }
+    { address: '0xcBa28b38103307Ec8dA98377ffF9816C164f9AFa', name: 'Morpho DAO Multisig' },
+    { address: '0x41DFc53B13932a2690C9790527C1967d8579a6ae', name: 'Veda Vaults' }
   ],
 
   // Base (8453)

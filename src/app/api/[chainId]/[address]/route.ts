@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { createPublicClient, http, isAddress } from 'viem';
+import { createPublicClient, http, isAddress, getAddress } from 'viem';
 import { multicall } from 'viem/actions';
-import { GNOSIS_SAFE_ABI } from '@/constants/contracts';
+import { GNOSIS_SAFE_ABI, OFFICIAL_SAFE_FALLBACK_HANDLERS, OFFICIAL_SAFE_PROXY_FACTORIES, SAFE_VERSIONS_WITH_KNOWN_FACTORIES } from '@/constants/contracts';
 import { SUPPORTED_CHAINS } from '@/constants/chains';
 
 interface SecurityCheck {
@@ -33,6 +33,8 @@ interface ApiResponse {
     rating: 'High Risk' | 'Medium Risk' | 'Low Risk';
     position: number;
     description: string;
+    penalties: { title: string; points: number; isCritical: boolean }[];
+    criticalCount: number;
   };
   checks?: SecurityCheck[];
 }
@@ -51,13 +53,13 @@ const EXPLORER_APIS = {
 // GitHub API for latest Safe version
 const GITHUB_API = 'https://api.github.com/repos/safe-global/safe-smart-account/releases';
 
-// Official Safe fallback handlers
-const OFFICIAL_SAFE_FALLBACK_HANDLERS: Record<string, string> = {
-  '0xf48f2B2d2a534e402487b3ee7C18c33Aec0Fe5e4': 'CompatibilityFallbackHandler',
-  '0x017062a1dE2FE6b99BE3d9d37841FeD19F573804': 'CompatibilityFallbackHandler (v1.3.0)',
-  '0x6851D6fDFAfD08c0295C392436245E5bc78B0185': 'CompatibilityFallbackHandler (v1.4.1)',
-  '0x2f870a80647BbC554F3a0EBD093f11B4d2a7492A': 'CompatibilityFallbackHandler (v1.4.1)',
+// Cache for Safe version info (24-hour TTL)
+const safeVersionCache: { latestVersion: string | null; fetchedAt: number } = {
+  latestVersion: null,
+  fetchedAt: 0,
 };
+const SAFE_VERSION_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+
 
 export async function GET(
   request: NextRequest,
@@ -321,7 +323,7 @@ export async function GET(
       }
     }
 
-    // Perform all 14 security checks
+    // Perform all 16 security checks
     const checks = await performAllSecurityChecks({
       address,
       chainId: parseInt(chainId),
@@ -357,7 +359,9 @@ export async function GET(
         score: securityScore.score,
         rating: securityScore.rating,
         position: securityScore.position,
-        description: securityScore.description
+        description: securityScore.description,
+        penalties: securityScore.penalties,
+        criticalCount: securityScore.criticalCount
       },
       checks
     };
@@ -377,7 +381,191 @@ export async function GET(
   }
 }
 
-// Perform all 14 security checks
+// Safe Transaction Service API URLs
+const SAFE_TX_API_URLS: Record<number, string> = {
+  1: 'https://safe-transaction-mainnet.safe.global',
+  56: 'https://safe-transaction-bsc.safe.global',
+  137: 'https://safe-transaction-polygon.safe.global',
+  42161: 'https://safe-transaction-arbitrum.safe.global',
+  10: 'https://safe-transaction-optimism.safe.global',
+  8453: 'https://safe-transaction-base.safe.global',
+  747474: 'https://safe-transaction-katana.safe.global',
+};
+
+// Check signing speed by analyzing confirmation timestamps
+async function checkSigningSpeed(address: string, chainId: number): Promise<SecurityCheck> {
+  const baseUrl = SAFE_TX_API_URLS[chainId];
+  if (!baseUrl) {
+    return {
+      id: 'signing_speed_analysis',
+      title: 'Signing Speed Analysis',
+      status: 'warning',
+      message: 'Could not analyze signing speed: Unsupported chain',
+    };
+  }
+
+  try {
+    const checksummedAddress = getAddress(address);
+    const url = `${baseUrl}/api/v1/safes/${checksummedAddress}/multisig-transactions/?executed=true&limit=10&ordering=-executionDate`;
+    const response = await fetch(url, { headers: { Accept: 'application/json' } });
+
+    if (!response.ok) {
+      return {
+        id: 'signing_speed_analysis',
+        title: 'Signing Speed Analysis',
+        status: 'warning',
+        message: `Could not analyze signing speed: API error ${response.status}`,
+      };
+    }
+
+    const data = await response.json();
+    const transactions = data.results || [];
+
+    if (!transactions.length) {
+      return {
+        id: 'signing_speed_analysis',
+        title: 'Signing Speed Analysis',
+        status: 'warning',
+        message: 'No transaction data available for signing speed analysis',
+      };
+    }
+
+    let totalDuration = 0;
+    let validTxCount = 0;
+
+    for (const tx of transactions) {
+      const confirmations = tx.confirmations || [];
+      if (!confirmations.length) continue;
+
+      const sorted = [...confirmations].sort((a: { submissionDate?: string }, b: { submissionDate?: string }) =>
+        (a.submissionDate || '').localeCompare(b.submissionDate || '')
+      );
+
+      const firstTime = sorted[0].submissionDate ? new Date(sorted[0].submissionDate).getTime() : null;
+      const lastTime = sorted[sorted.length - 1].submissionDate ? new Date(sorted[sorted.length - 1].submissionDate).getTime() : null;
+
+      if (firstTime && lastTime && !isNaN(firstTime) && !isNaN(lastTime)) {
+        const durationSeconds = (lastTime - firstTime) / 1000;
+        totalDuration += durationSeconds;
+        validTxCount++;
+      }
+    }
+
+    if (validTxCount === 0) {
+      return {
+        id: 'signing_speed_analysis',
+        title: 'Signing Speed Analysis',
+        status: 'warning',
+        message: 'No valid transaction timing data',
+      };
+    }
+
+    const avgDuration = totalDuration / validTxCount;
+    // < 10 min = error (too fast, indicates centralization), < 6 hours = warning, >= 6 hours = success
+    const status = avgDuration < 600 ? 'error' : avgDuration < 21600 ? 'warning' : 'success';
+
+    const formatDuration = (seconds: number): string => {
+      if (seconds < 60) return `${Math.round(seconds)} seconds`;
+      if (seconds < 3600) return `${Math.round(seconds / 60)} minutes`;
+      if (seconds < 86400) return `${(seconds / 3600).toFixed(1)} hours`;
+      return `${(seconds / 86400).toFixed(1)} days`;
+    };
+
+    const message = status === 'error'
+      ? `Signatures collected very quickly (avg ${formatDuration(avgDuration)} across ${validTxCount} transactions). This may indicate centralized control.`
+      : status === 'warning'
+        ? `Moderate signing speed (avg ${formatDuration(avgDuration)} across ${validTxCount} transactions).`
+        : `Healthy signing speed (avg ${formatDuration(avgDuration)} across ${validTxCount} transactions). Signatures are collected over a reasonable timeframe.`;
+
+    return {
+      id: 'signing_speed_analysis',
+      title: 'Signing Speed Analysis',
+      status,
+      message,
+      details: { avgDurationSeconds: avgDuration, transactionsAnalyzed: validTxCount },
+    };
+  } catch (error) {
+    return {
+      id: 'signing_speed_analysis',
+      title: 'Signing Speed Analysis',
+      status: 'warning',
+      message: `Could not analyze signing speed: ${error instanceof Error ? error.message : 'Unknown error'}`,
+    };
+  }
+}
+
+// Check if the Safe was deployed by an official proxy factory
+async function checkSafeFactory(address: string, chainId: number, safeVersion: string): Promise<SecurityCheck> {
+  const baseUrl = SAFE_TX_API_URLS[chainId];
+  const versionHasKnownFactories = SAFE_VERSIONS_WITH_KNOWN_FACTORIES.has(safeVersion);
+
+  if (!baseUrl) {
+    return {
+      id: 'safe_factory',
+      title: 'Safe Factory',
+      status: 'warning',
+      message: 'Could not determine deployment factory: Unsupported chain',
+    };
+  }
+
+  try {
+    const checksummedAddress = getAddress(address);
+    const url = `${baseUrl}/api/v1/safes/${checksummedAddress}/creation/`;
+    const response = await fetch(url, { headers: { Accept: 'application/json' } });
+
+    if (!response.ok) {
+      return {
+        id: 'safe_factory',
+        title: 'Safe Factory',
+        status: 'warning',
+        message: 'Could not determine deployment factory.',
+      };
+    }
+
+    const data = await response.json();
+    const factoryAddress = data.factoryAddress;
+
+    if (!factoryAddress) {
+      return {
+        id: 'safe_factory',
+        title: 'Safe Factory',
+        status: 'warning',
+        message: 'Could not determine deployment factory.',
+      };
+    }
+
+    const factoryInfo = OFFICIAL_SAFE_PROXY_FACTORIES[factoryAddress.toLowerCase()] || null;
+
+    if (factoryInfo) {
+      return {
+        id: 'safe_factory',
+        title: 'Safe Factory',
+        status: 'success',
+        message: `Deployed by official factory: ${factoryInfo.name}`,
+        details: { factoryAddress, factoryName: factoryInfo.name, isOfficial: true },
+      };
+    }
+
+    return {
+      id: 'safe_factory',
+      title: 'Safe Factory',
+      status: versionHasKnownFactories ? 'error' : 'warning',
+      message: versionHasKnownFactories
+        ? 'Deployed by unrecognized factory. Verify this Safe was not created with modified code.'
+        : 'Deployed by unrecognized factory. No known official factories for this Safe version, so this may be expected.',
+      details: { factoryAddress, isOfficial: false, versionHasKnownFactories },
+    };
+  } catch (error) {
+    return {
+      id: 'safe_factory',
+      title: 'Safe Factory',
+      status: 'warning',
+      message: `Could not determine deployment factory: ${error instanceof Error ? error.message : 'Unknown error'}`,
+    };
+  }
+}
+
+// Perform all 16 security checks
 async function performAllSecurityChecks(params: {
   address: string;
   chainId: number;
@@ -395,7 +583,11 @@ async function performAllSecurityChecks(params: {
   const { address, chainId, version, threshold, owners, nonce, modules, guard, fallbackHandler, client } = params;
   const checks: SecurityCheck[] = [];
 
-  // 1. Signer Threshold
+  // 1. Signing Speed Analysis
+  const signingSpeedCheck = await checkSigningSpeed(address, chainId);
+  checks.push(signingSpeedCheck);
+
+  // 2. Signer Threshold
   checks.push({
     id: 'signer_threshold',
     title: 'Signer Threshold',
@@ -408,7 +600,7 @@ async function performAllSecurityChecks(params: {
     details: { threshold, owners: owners.length }
   });
 
-  // 2. Signer Threshold Percentage
+  // 3. Signer Threshold Percentage
   const thresholdPercentage = owners.length > 0 ? (threshold / owners.length) * 100 : 0;
   checks.push({
     id: 'signer_threshold_percentage',
@@ -422,15 +614,15 @@ async function performAllSecurityChecks(params: {
     details: { percentage: thresholdPercentage }
   });
 
-  // 3. Safe Version
+  // 4. Safe Version
   const versionCheck = await checkSafeVersion(version);
   checks.push(versionCheck);
 
-  // 4. Contract Creation Date
+  // 5. Contract Creation Date
   const creationDateCheck = await checkContractCreationDate(address, chainId);
   checks.push(creationDateCheck);
 
-  // 5. Multisig Nonce
+  // 6. Multisig Nonce
   checks.push({
     id: 'multisig_nonce',
     title: 'Multisig Nonce',
@@ -443,11 +635,15 @@ async function performAllSecurityChecks(params: {
     details: { nonce }
   });
 
-  // 6. Last Transaction Date
+  // 7. Last Transaction Date
   const lastTransactionCheck = await checkLastTransactionDate(address, chainId, nonce);
   checks.push(lastTransactionCheck);
 
-  // 7. Optional Modules
+  // 8. Safe Factory
+  const factoryCheck = await checkSafeFactory(address, chainId, version);
+  checks.push(factoryCheck);
+
+  // 9. Optional Modules
   checks.push({
     id: 'optional_modules',
     title: 'Optional Modules',
@@ -458,7 +654,7 @@ async function performAllSecurityChecks(params: {
     details: { modules, count: modules.length }
   });
 
-  // 8. Transaction Guard
+  // 10. Transaction Guard
   checks.push({
     id: 'transaction_guard',
     title: 'Transaction Guard',
@@ -469,7 +665,7 @@ async function performAllSecurityChecks(params: {
     details: { guard }
   });
 
-  // 9. Fallback Handler
+  // 11. Fallback Handler
   const isOfficialHandler = OFFICIAL_SAFE_FALLBACK_HANDLERS[fallbackHandler];
   const fallbackStatus = fallbackHandler === '0x0000000000000000000000000000000000000000' 
     ? 'success' : isOfficialHandler ? 'success' : 'warning';
@@ -485,23 +681,23 @@ async function performAllSecurityChecks(params: {
     details: { fallbackHandler, isOfficial: !!isOfficialHandler }
   });
 
-  // 10. Chain Configuration
+  // 12. Chain Configuration
   const multiChainCheck = await checkMultiChainDeployment(address, chainId);
   checks.push(multiChainCheck);
 
-  // 11. Owner Activity Analysis
+  // 13. Owner Activity Analysis
   const ownerActivityCheck = await checkOwnerActivity(owners);
   checks.push(ownerActivityCheck);
 
-  // 12. Emergency Recovery Mechanisms
+  // 14. Emergency Recovery Mechanisms
   const recoveryCheck = await checkEmergencyRecovery(modules);
   checks.push(recoveryCheck);
 
-  // 13. Contract Signers
+  // 15. Contract Signers
   const contractSignersCheck = await checkContractSigners(owners, client);
   checks.push(contractSignersCheck);
 
-  // 14. Multi-Chain Signer Analysis
+  // 16. Multi-Chain Signer Analysis
   const multiChainSignerCheck = await checkMultiChainSigners(address, owners, chainId);
   checks.push(multiChainSignerCheck);
 
@@ -516,13 +712,21 @@ function getApiKey(): string | null {
 // Check Safe version against GitHub releases
 async function checkSafeVersion(version: string): Promise<SecurityCheck> {
   try {
-    const response = await fetch(GITHUB_API);
-    if (!response.ok) throw new Error('GitHub API error');
-    
-    const releases = await response.json();
-    if (!releases || releases.length === 0) throw new Error('No releases found');
+    let latestVersion: string;
 
-    const latestVersion = releases[0].tag_name.replace('v', '');
+    if (safeVersionCache.latestVersion && Date.now() - safeVersionCache.fetchedAt < SAFE_VERSION_CACHE_TTL_MS) {
+      latestVersion = safeVersionCache.latestVersion;
+    } else {
+      const response = await fetch(GITHUB_API);
+      if (!response.ok) throw new Error('GitHub API error');
+
+      const releases = await response.json();
+      if (!releases || releases.length === 0) throw new Error('No releases found');
+
+      latestVersion = releases[0].tag_name.replace('v', '');
+      safeVersionCache.latestVersion = latestVersion;
+      safeVersionCache.fetchedAt = Date.now();
+    }
     
     // Simple version comparison - would need proper semver comparison in production
     const isLatest = version === latestVersion;
@@ -845,31 +1049,90 @@ async function checkMultiChainSigners(address: string, owners: string[], current
   };
 }
 
-// Calculate security score (same logic as web app)
+// Test penalty configuration - matches web app's Cumulative Risk Penalty algorithm
+const TEST_PENALTIES: Record<string, { error: number; warning: number; isCritical: boolean }> = {
+  'Threshold': { error: 20, warning: 10, isCritical: true },
+  'Signer Threshold': { error: 20, warning: 10, isCritical: true },
+  'Owner Count': { error: 18, warning: 9, isCritical: true },
+  'Signer Threshold Percentage': { error: 18, warning: 9, isCritical: true },
+  'Fallback Handler': { error: 14, warning: 6, isCritical: false },
+  'Proxy Implementation': { error: 18, warning: 8, isCritical: true },
+  'Guard': { error: 12, warning: 5, isCritical: false },
+  'Transaction Guard': { error: 12, warning: 5, isCritical: false },
+  'Modules': { error: 12, warning: 5, isCritical: false },
+  'Optional Modules': { error: 12, warning: 5, isCritical: false },
+  'Contract Version': { error: 10, warning: 4, isCritical: false },
+  'Safe Version': { error: 10, warning: 4, isCritical: false },
+  'Signing Speed Analysis': { error: 16, warning: 8, isCritical: false },
+  'Owner Balance': { error: 6, warning: 3, isCritical: false },
+  'Duplicate Owners': { error: 6, warning: 3, isCritical: false },
+  'Etherscan Verification': { error: 4, warning: 2, isCritical: false },
+  'Emergency Recovery Mechanisms': { error: 2, warning: 1, isCritical: false },
+  'Contract Signers': { error: 2, warning: 1, isCritical: false },
+  'Safe Factory': { error: 10, warning: 4, isCritical: false },
+  'Chain Configuration': { error: 2, warning: 1, isCritical: false },
+};
+
+const DEFAULT_PENALTY = { error: 8, warning: 4, isCritical: false };
+
+// Calculate security score (same algorithm as web app - Cumulative Risk Penalty)
 function calculateSecurityScore(checks: SecurityCheck[]) {
-  const totalChecks = checks.length;
-  const successCount = checks.filter(check => check.status === 'success').length;
-  const warningCount = checks.filter(check => check.status === 'warning').length;
-  
-  const score = Math.round((successCount * 10 + warningCount * 7) / (totalChecks * 10) * 100);
-  
-  let rating: 'High Risk' | 'Medium Risk' | 'Low Risk';
+  let score = 100;
+  let criticalFailures = 0;
+  let criticalWarnings = 0;
+  const penalties: { title: string; points: number; isCritical: boolean }[] = [];
+
+  for (const check of checks) {
+    const config = TEST_PENALTIES[check.title] || DEFAULT_PENALTY;
+
+    if (check.status === 'error') {
+      score -= config.error;
+      penalties.push({ title: check.title, points: config.error, isCritical: config.isCritical });
+      if (config.isCritical) criticalFailures++;
+    } else if (check.status === 'warning') {
+      score -= config.warning;
+      penalties.push({ title: check.title, points: config.warning, isCritical: config.isCritical });
+      if (config.isCritical) criticalWarnings++;
+    }
+  }
+
+  // Compounding penalty for multiple critical issues
+  const totalCriticalIssues = criticalFailures + criticalWarnings;
+  if (totalCriticalIssues >= 3) {
+    score -= 8;
+    penalties.push({ title: 'Multiple Critical Issues', points: 8, isCritical: true });
+  }
+  if (totalCriticalIssues >= 5) {
+    score -= 10;
+    penalties.push({ title: 'Severe Critical Issues', points: 10, isCritical: true });
+  }
+
+  const rawScore = Math.max(0, Math.min(100, score));
+
+  // Position on slider with curve that emphasizes good vs bad
   let position: number;
+  if (rawScore >= 65) {
+    position = 66 + (rawScore - 65) * 0.83;
+  } else if (rawScore >= 40) {
+    position = 33 + (rawScore - 40) * 1.28;
+  } else {
+    position = 5 + rawScore * 0.72;
+  }
+  position = Math.max(5, Math.min(95, position));
+
+  let rating: 'High Risk' | 'Medium Risk' | 'Low Risk';
   let description: string;
 
-  if (score >= 70) {
+  if (rawScore >= 65) {
     rating = 'Low Risk';
-    position = Math.min(95, 70 + (score - 70) * 0.83);
     description = 'Your Safe follows security best practices with minimal issues.';
-  } else if (score >= 50) {
+  } else if (rawScore >= 40) {
     rating = 'Medium Risk';
-    position = 35 + (score - 50) * 1.55;
     description = 'Your Safe has moderate security risks that should be addressed.';
   } else {
     rating = 'High Risk';
-    position = Math.max(5, score * 0.6);
     description = 'Your Safe has significant security risks that need immediate attention.';
   }
 
-  return { score, rating, position, description };
+  return { score: rawScore, rating, position, description, penalties: penalties.sort((a, b) => b.points - a.points), criticalCount: totalCriticalIssues };
 }
