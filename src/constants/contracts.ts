@@ -84,5 +84,27 @@ export const OFFICIAL_SAFE_FALLBACK_HANDLERS: { [address: string]: string } = {
   '0x727a77a074d1e6c4530e814f89e618a3298fc044': 'SimulateTxAccessor',
 };
 
+// Official Safe proxy factory addresses, keyed by lowercase address → { name, version }
+export const OFFICIAL_SAFE_PROXY_FACTORIES: { [address: string]: { name: string; version: string } } = {
+  // v1.0.0
+  '0x12302fe9c02ff50939baaaaf415fc226c078613c': { name: 'ProxyFactory v1.0.0', version: '1.0.0' },
+  // v1.1.1
+  '0x76e2cfc1f5fa8f6a5b3fc4c8f4788f0116861f9b': { name: 'ProxyFactory v1.1.1', version: '1.1.1' },
+  // v1.3.0
+  '0xa6b71e26c5e0845f74c812102ca7114b6a896ab2': { name: 'GnosisSafeProxyFactory v1.3.0', version: '1.3.0' },
+  '0xc22834581ebc8527d974f8a1c97e1bea4ef910bc': { name: 'GnosisSafeProxyFactory v1.3.0 (EIP-155)', version: '1.3.0' },
+  '0xdaec33641865e4651fb43181c6db6f7232ee91c2': { name: 'GnosisSafeProxyFactory v1.3.0 (zkSync)', version: '1.3.0' },
+  // v1.4.1
+  '0x4e1dcf7ad4e460cfd30791ccc4f9c8a4f820ec67': { name: 'SafeProxyFactory v1.4.1', version: '1.4.1' },
+  '0xc329d02fd8cb2fc13aa919005af46320794a8629': { name: 'SafeProxyFactory v1.4.1 (zkSync)', version: '1.4.1' },
+  // v1.5.0
+  '0x14f2982d601c9458f93bd70b218933a6f8165e7b': { name: 'SafeProxyFactory v1.5.0', version: '1.5.0' },
+};
+
+// Safe versions for which we have known factory addresses
+export const SAFE_VERSIONS_WITH_KNOWN_FACTORIES = new Set(
+  Object.values(OFFICIAL_SAFE_PROXY_FACTORIES).map(f => f.version)
+);
+
 // Sentinel address used for modules list
 export const SENTINEL_MODULES_ADDRESS = '0x0000000000000000000000000000000000000001';

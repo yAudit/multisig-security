@@ -7,9 +7,11 @@ Security analyzer for Safe (formerly Gnosis Safe) multisig wallets. Paste a Safe
 ## Key Capabilities
 
 - **Deep Safe introspection** – batch RPC calls retrieve the Safe version, owner set, signing threshold, nonce, enabled modules, guard, and fallback handler.
-- **Security heuristics** – fourteen checks score each Safe on threshold quality, owner activity, EOA vs contract signers, optional modules, fallback handler provenance, emergency recovery settings, and more.
+- **Security heuristics** – sixteen checks score each Safe on threshold quality, signing speed, proxy factory provenance, owner activity, EOA vs contract signers, optional modules, fallback handler provenance, emergency recovery settings, and more.
+- **Signing speed analysis** – measures average time between first and last confirmation across recent transactions to flag potential signer centralization.
+- **Factory verification** – checks whether the Safe was deployed by an official Safe proxy factory, with version-aware scoring for versions where no factory addresses are catalogued.
 - **Cross-chain awareness** – detects deployments across Ethereum, Base, Arbitrum, Optimism, Polygon, and Katana, then warns when signers are reused between chains (replay-attack risk).
-- **Fresh data sources** – combines viem RPC calls, Safe Protocol Kit helpers, GitHub release metadata, and Etherscan-style explorer APIs with rate limiting and RPC fallbacks.
+- **Fresh data sources** – combines viem RPC calls, Safe Protocol Kit helpers, Safe Transaction Service APIs, GitHub release metadata, and Etherscan-style explorer APIs with rate limiting and RPC fallbacks.
 - **Human-friendly UX** – color-coded score bar, hover tooltips that explain every check, and curated example Safes for each chain so you can demo the tool instantly.
 
 ## Stack
@@ -58,14 +60,14 @@ All functionality is exposed through the built-in API route:
 GET /api/[chainId]/[address]
 ```
 
-- `chainId`: numeric ID from `SUPPORTED_CHAINS` (1, 8453, 42161, 10, 137, 747474).
+- `chainId`: numeric ID from `SUPPORTED_CHAINS` (1, 56, 8453, 42161, 10, 137, 747474).
 - `address`: Safe contract address (checksum format preferred).
 
 Response payload:
 
 - `safeInfo`: version, threshold, owners, nonce, modules, guard, fallback handler.
-- `securityScore`: aggregate score (0–100) plus qualitative rating.
-- `checks`: array of the fourteen security checks, each with `status` (`success`, `warning`, `error`) and a descriptive message.
+- `securityScore`: aggregate score (0–100) using the Cumulative Risk Penalty algorithm, qualitative rating (`Low Risk` / `Medium Risk` / `High Risk`), per-check penalty breakdown, and critical issue count.
+- `checks`: array of sixteen security checks, each with `status` (`success`, `warning`, `error`) and a descriptive message.
 
 This makes it easy to plug the analyzer into monitoring scripts or dashboards without scraping the UI.
 

@@ -59,6 +59,15 @@ export const SECURITY_CHECK_TOOLTIPS: Record<string, TooltipInfo> = {
     ],
     learnMoreUrl: 'https://docs.safe.global/'
   },
+  'Safe Factory': {
+    description: 'Checks whether the Safe was deployed by an official Safe proxy factory contract. Safes deployed by unknown factories may have been created with modified or malicious code.',
+    thresholds: [
+      { status: '✅ Success', condition: 'Deployed by an official Safe proxy factory' },
+      { status: '⚠️ Warning', condition: 'Factory address unknown or could not be checked' },
+      { status: '❌ Error', condition: 'Deployed by an unrecognized factory (requires investigation)' }
+    ],
+    learnMoreUrl: 'https://github.com/safe-global/safe-smart-account/tree/main/contracts/proxies'
+  },
   'Optional Modules': {
     description: 'Additional functionality modules installed on the Safe. Modules can add features but also increase attack surface.',
     thresholds: [

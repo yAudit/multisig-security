@@ -4,7 +4,7 @@ import React, { useState, useMemo, useCallback, useEffect } from 'react';
 import { createPublicClient, http, isAddress, getAddress } from 'viem';
 import { multicall } from 'viem/actions';
 import Safe from '@safe-global/protocol-kit';
-import { GNOSIS_SAFE_ABI, OFFICIAL_SAFE_FALLBACK_HANDLERS, SENTINEL_MODULES_ADDRESS } from '../constants/contracts';
+import { GNOSIS_SAFE_ABI, OFFICIAL_SAFE_FALLBACK_HANDLERS, OFFICIAL_SAFE_PROXY_FACTORIES, SAFE_VERSIONS_WITH_KNOWN_FACTORIES, SENTINEL_MODULES_ADDRESS } from '../constants/contracts';
 import { SUPPORTED_CHAINS, DEFAULT_CHAIN, CHAIN_ID_MAP, CHAIN_EXAMPLES, type ChainConfig } from '../constants/chains';
 import { getTooltipInfo } from '../constants/tooltips';
 import { Search, Share2, Info, CheckCircle, AlertTriangle, XCircle, Loader2, Zap, ChevronDown, ShieldAlert, Shield } from 'lucide-react';
@@ -135,9 +135,15 @@ const TEST_PENALTIES: Record<string, PenaltyConfig> = {
     isCritical: false,
     description: 'Check if signers are smart contracts'
   },
-  'Chain Configuration': { 
-    error: 2, 
-    warning: 1, 
+  'Safe Factory': {
+    error: 10,
+    warning: 4,
+    isCritical: false,
+    description: 'Checks if Safe was deployed by an official proxy factory'
+  },
+  'Chain Configuration': {
+    error: 2,
+    warning: 1,
     isCritical: false,
     description: 'Multi-chain deployment check'
   },
@@ -151,6 +157,17 @@ const DEFAULT_PENALTY: PenaltyConfig = {
   description: 'Security check'
 };
 
+
+// Safe Transaction Service API URLs
+const SAFE_API_URLS: Record<number, string> = {
+  1: 'https://safe-transaction-mainnet.safe.global',
+  56: 'https://safe-transaction-bsc.safe.global',
+  137: 'https://safe-transaction-polygon.safe.global',
+  42161: 'https://safe-transaction-arbitrum.safe.global',
+  10: 'https://safe-transaction-optimism.safe.global',
+  8453: 'https://safe-transaction-base.safe.global',
+  747474: 'https://safe-transaction-katana.safe.global',
+};
 
 // Cache for Safe version info fetched from GitHub (shared across analyses)
 const safeVersionCache: {
@@ -1370,16 +1387,6 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
 
   // Helper function to fetch signing speed data for status determination
   const fetchSigningSpeedData = async (address: string, chainId: number): Promise<{ avgDuration: number | null; error?: string }> => {
-    const SAFE_API_URLS: Record<number, string> = {
-      1: 'https://safe-transaction-mainnet.safe.global',
-      56: 'https://safe-transaction-bsc.safe.global',
-      137: 'https://safe-transaction-polygon.safe.global',
-      42161: 'https://safe-transaction-arbitrum.safe.global',
-      10: 'https://safe-transaction-optimism.safe.global',
-      8453: 'https://safe-transaction-base.safe.global',
-      747474: 'https://safe-transaction-katana.safe.global',
-    };
-
     const baseUrl = SAFE_API_URLS[chainId];
     if (!baseUrl) {
       return { avgDuration: null, error: 'Unsupported chain' };
@@ -1433,6 +1440,49 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
     }
   };
 
+  // Helper function to check if the Safe was deployed by an official factory
+  const checkSafeFactory = async (address: string, chainId: number, safeVersion: string): Promise<{
+    factoryAddress: string | null;
+    factoryName: string | null;
+    isOfficial: boolean | null;
+    versionHasKnownFactories: boolean;
+    error?: string;
+  }> => {
+    const versionHasKnownFactories = SAFE_VERSIONS_WITH_KNOWN_FACTORIES.has(safeVersion);
+
+    const baseUrl = SAFE_API_URLS[chainId];
+    if (!baseUrl) {
+      return { factoryAddress: null, factoryName: null, isOfficial: null, versionHasKnownFactories, error: 'Unsupported chain' };
+    }
+
+    try {
+      const checksummedAddress = getAddress(address);
+      const url = `${baseUrl}/api/v1/safes/${checksummedAddress}/creation/`;
+      const response = await fetch(url, { headers: { Accept: 'application/json' } });
+
+      if (!response.ok) {
+        return { factoryAddress: null, factoryName: null, isOfficial: null, versionHasKnownFactories, error: `API error: ${response.status}` };
+      }
+
+      const data = await response.json();
+      const factoryAddress = data.factoryAddress;
+
+      if (!factoryAddress) {
+        return { factoryAddress: null, factoryName: null, isOfficial: null, versionHasKnownFactories, error: 'No factory address returned' };
+      }
+
+      const factoryInfo = OFFICIAL_SAFE_PROXY_FACTORIES[factoryAddress.toLowerCase()] || null;
+      return {
+        factoryAddress,
+        factoryName: factoryInfo?.name || null,
+        isOfficial: factoryInfo !== null,
+        versionHasKnownFactories,
+      };
+    } catch (error) {
+      return { factoryAddress: null, factoryName: null, isOfficial: null, versionHasKnownFactories, error: error instanceof Error ? error.message : 'Unknown error' };
+    }
+  };
+
   const performAnalysis = useCallback(async (addressToAnalyze: string) => {
     setLoading(true);
     setError('');
@@ -1458,6 +1508,7 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
         { title: 'Contract Creation Date', status: 'loading', message: 'Loading creation date...' },
         { title: 'Multisig Nonce', status: 'loading', message: 'Loading nonce information...' },
         { title: 'Last Transaction Date', status: 'loading', message: 'Loading last transaction date...' },
+        { title: 'Safe Factory', status: 'loading', message: 'Checking deployment factory...' },
         { title: 'Optional Modules', status: 'loading', message: 'Loading module information...' },
         { title: 'Transaction Guard', status: 'loading', message: 'Checking transaction guard configuration...' },
         { title: 'Fallback Handler', status: 'loading', message: 'Checking fallback handler configuration...' },
@@ -1538,6 +1589,7 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
       const fallbackHandlerPromise = checkSafeFallbackHandler(addressToAnalyze, selectedChain);
       const chainConfigPromise = checkChainConfiguration(addressToAnalyze);
       const recoveryPromise = checkRecoveryMechanisms(addressToAnalyze, selectedChain, modules, threshold);
+      const factoryPromise = checkSafeFactory(addressToAnalyze, selectedChain.id, version);
 
       // Update Contract Creation Date when ready
       creationDatePromise.then(creationDate => {
@@ -1579,8 +1631,73 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
       };
       setResults([...updatedResults]);
 
+      // Update Safe Factory when ready
+      factoryPromise.then(({ factoryAddress, factoryName, isOfficial, versionHasKnownFactories, error }) => {
+        setResults(currentResults => {
+          const newResults = [...currentResults];
+
+          if (error || isOfficial === null) {
+            newResults[7] = {
+              title: 'Safe Factory',
+              status: 'warning',
+              message: 'Could not determine deployment factory.'
+            };
+          } else if (isOfficial) {
+            newResults[7] = {
+              title: 'Safe Factory',
+              status: 'success',
+              message: (
+                <div className="min-w-0">
+                  <div>Deployed by official factory: <strong>{factoryName}</strong></div>
+                  <div className="mt-1 sm:mt-2">
+                    <div className="ml-1 sm:ml-2 break-all break-words min-w-0 max-w-full overflow-hidden text-sm sm:text-base">
+                      <a
+                        href={`${selectedChain.explorerUrl}/address/${factoryAddress}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-blue-600 hover:text-blue-800 underline block"
+                      >
+                        {factoryAddress}
+                      </a>
+                    </div>
+                  </div>
+                </div>
+              )
+            };
+          } else {
+            newResults[7] = {
+              title: 'Safe Factory',
+              status: versionHasKnownFactories ? 'error' : 'warning',
+              message: (
+                <div className="min-w-0">
+                  <div>{versionHasKnownFactories
+                    ? 'Deployed by unrecognized factory. Verify this Safe was not created with modified code.'
+                    : 'Deployed by unrecognized factory. No known official factories for this Safe version, so this may be expected.'
+                  }</div>
+                  <div className="mt-1 sm:mt-2">
+                    <div className="font-medium text-sm sm:text-base">Factory Address:</div>
+                    <div className="ml-1 sm:ml-2 break-all break-words min-w-0 max-w-full overflow-hidden text-sm sm:text-base">
+                      <a
+                        href={`${selectedChain.explorerUrl}/address/${factoryAddress}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-blue-600 hover:text-blue-800 underline block"
+                      >
+                        {factoryAddress}
+                      </a>
+                    </div>
+                  </div>
+                </div>
+              )
+            };
+          }
+
+          return newResults;
+        });
+      });
+
       // Update Optional Modules (using multicall result) with loading state initially
-      updatedResults[7] = {
+      updatedResults[8] = {
         title: 'Optional Modules',
         status: modules.length === 0 ? 'success' : 'loading',
         message: modules.length === 0
@@ -1620,7 +1737,7 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
         fetchModulesSequentially().then(moduleDetails => {
           setResults(currentResults => {
             const newResults = [...currentResults];
-            newResults[7] = {
+            newResults[8] = {
               title: 'Optional Modules',
               status: 'warning',
               message: (
@@ -1655,7 +1772,7 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
           console.error('Error fetching module names:', error);
           setResults(currentResults => {
             const newResults = [...currentResults];
-            newResults[7] = {
+            newResults[8] = {
               title: 'Optional Modules',
               status: 'warning',
               message: `${modules.length} module${modules.length === 1 ? '' : 's'} enabled. Review module security. Could not load module names.`
@@ -1709,21 +1826,21 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
 
           if (errorOwners.length === owners.length) {
             // All owners had errors, likely due to missing API key or unsupported chain
-            newResults[11] = {
+            newResults[12] = {
               title: 'Owner Activity Analysis',
               status: 'warning',
               message: 'Could not analyze owner activity (Explorer API key required)'
             };
           } else if (activeOwners.length === 0) {
             // All owners are inactive (good)
-            newResults[11] = {
+            newResults[12] = {
               title: 'Owner Activity Analysis',
               status: 'success',
               message: `All ${inactiveOwners.length} owner${inactiveOwners.length === 1 ? '' : 's'} may be used exclusively for multisig signing (no recent non-multisig transactions).`
             };
           } else {
             // Some owners are active (not ideal)
-            newResults[11] = {
+            newResults[12] = {
               title: 'Owner Activity Analysis',
               status: 'warning',
               message: (
@@ -1767,13 +1884,13 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
           if (typeof guardResult === 'object' && guardResult !== null && 'error' in guardResult) {
             // Handle different types of errors
             if (guardResult.error === 'UNSUPPORTED_VERSION') {
-              newResults[8] = {
+              newResults[9] = {
                 title: 'Transaction Guard',
                 status: 'warning',
                 message: 'Could not check transaction guard status (Safe version too old for Safe SDK support)'
               };
             } else {
-              newResults[8] = {
+              newResults[9] = {
                 title: 'Transaction Guard',
                 status: 'warning',
                 message: 'Could not check transaction guard status (requires Safe SDK support)'
@@ -1781,14 +1898,14 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
             }
           } else if (guardResult === '0x0000000000000000000000000000000000000000' || guardResult === '') {
             // No guard enabled (good)
-            newResults[8] = {
+            newResults[9] = {
               title: 'Transaction Guard',
               status: 'success',
               message: 'No transaction guard enabled. Uses standard Safe transaction execution.'
             };
           } else {
             // Guard enabled (warning - requires review)
-            newResults[8] = {
+            newResults[9] = {
               title: 'Transaction Guard',
               status: 'warning',
               message: (
@@ -1825,13 +1942,13 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
           if (typeof fallbackHandlerResult === 'object' && fallbackHandlerResult !== null && 'error' in fallbackHandlerResult) {
             // Handle different types of errors
             if (fallbackHandlerResult.error === 'UNSUPPORTED_VERSION') {
-              newResults[9] = {
+              newResults[10] = {
                 title: 'Fallback Handler',
                 status: 'warning',
                 message: 'Could not check fallback handler status (Safe version too old for Safe SDK support)'
               };
             } else {
-              newResults[9] = {
+              newResults[10] = {
                 title: 'Fallback Handler',
                 status: 'warning',
                 message: 'Could not check fallback handler status (requires Safe SDK support)'
@@ -1839,7 +1956,7 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
             }
           } else if (fallbackHandlerResult === '0x0000000000000000000000000000000000000000' || fallbackHandlerResult === '') {
             // No fallback handler enabled (good)
-            newResults[9] = {
+            newResults[10] = {
               title: 'Fallback Handler',
               status: 'success',
               message: 'No fallback handler enabled. Uses standard Safe functionality only.'
@@ -1850,7 +1967,7 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
 
             if (handlerName) {
               // Known official fallback handler (good)
-              newResults[9] = {
+              newResults[10] = {
                 title: 'Fallback Handler',
                 status: 'success',
                 message: (
@@ -1874,7 +1991,7 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
               };
             } else {
               // Unknown fallback handler (warning - requires review)
-              newResults[9] = {
+              newResults[10] = {
                 title: 'Fallback Handler',
                 status: 'warning',
                 message: (
@@ -1910,21 +2027,21 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
 
           if (totalDeployments === 0) {
             // Should not happen as we already verified the contract exists
-            newResults[10] = {
+            newResults[11] = {
               title: 'Chain Configuration',
               status: 'error',
               message: 'Could not verify Safe deployment on any chain'
             };
           } else if (totalDeployments === 1) {
             // Safe only deployed on one chain (good)
-            newResults[10] = {
+            newResults[11] = {
               title: 'Chain Configuration',
               status: 'success',
               message: `Safe is deployed only on ${selectedChain.name}. No multi-chain deployment detected.`
             };
 
             // Skip Multi-Chain Signer Analysis for single-chain deployments
-            newResults[14] = {
+            newResults[15] = {
               title: 'Multi-Chain Signer Analysis',
               status: 'success',
               message: 'Not applicable - Safe is only deployed on one chain.'
@@ -1932,7 +2049,7 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
           } else {
             // Safe deployed on multiple chains (warning - replay risk)
             const chainNames = deployedChains.map(chain => chain.name).join(', ');
-            newResults[10] = {
+            newResults[11] = {
               title: 'Chain Configuration',
               status: 'warning',
               message: (
@@ -1947,7 +2064,7 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
             };
 
             // Trigger multi-chain signer reuse analysis
-            newResults[14] = {
+            newResults[15] = {
               title: 'Multi-Chain Signer Analysis',
               status: 'loading',
               message: 'Analyzing signer reuse across chains...'
@@ -1960,14 +2077,14 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
 
                 if (reusedSigners.length === 0) {
                   // No signer reuse detected (good)
-                  updatedResults[14] = {
+                  updatedResults[15] = {
                     title: 'Multi-Chain Signer Analysis',
                     status: 'success',
                     message: '✅ No signer address appears on different chains. Each chain has unique signers.'
                   };
                 } else {
                   // Signer reuse detected (warning)
-                  updatedResults[14] = {
+                  updatedResults[15] = {
                     title: 'Multi-Chain Signer Analysis',
                     status: 'warning',
                     message: (
@@ -2002,7 +2119,7 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
               console.error('Multi-chain signer analysis failed:', error);
               setResults(currentResults => {
                 const updatedResults = [...currentResults];
-                updatedResults[14] = {
+                updatedResults[15] = {
                   title: 'Multi-Chain Signer Analysis',
                   status: 'error',
                   message: 'Could not analyze signer reuse across chains'
@@ -2018,7 +2135,7 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
         console.error('Error checking chain configuration:', error);
         setResults(currentResults => {
           const newResults = [...currentResults];
-          newResults[9] = {
+          newResults[11] = {
             title: 'Chain Configuration',
             status: 'warning',
             message: 'Could not complete multi-chain deployment check'
@@ -2077,7 +2194,7 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
 
           if (!hasRecoveryModule) {
             // No recovery module (neutral - not necessarily bad)
-            newResults[12] = {
+            newResults[13] = {
               title: 'Emergency Recovery Mechanisms',
               status: 'warning',
               message: 'No recovery module detected. Consider implementing social recovery or guardian mechanisms for emergency access.'
@@ -2086,7 +2203,7 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
             // Recovery module exists - assess configuration
             if (thresholdComparison === 'lower') {
               // Recovery threshold is lower than normal - potential security risk
-              newResults[12] = {
+              newResults[13] = {
                 title: 'Emergency Recovery Mechanisms',
                 status: 'error',
                 message: (
@@ -2125,7 +2242,7 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
               };
             } else if (thresholdComparison === 'equal') {
               // Recovery threshold equals normal - reasonable
-              newResults[12] = {
+              newResults[13] = {
                 title: 'Emergency Recovery Mechanisms',
                 status: 'success',
                 message: (
@@ -2155,7 +2272,7 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
               };
             } else if (thresholdComparison === 'higher') {
               // Recovery threshold is higher - very secure
-              newResults[12] = {
+              newResults[13] = {
                 title: 'Emergency Recovery Mechanisms',
                 status: 'success',
                 message: (
@@ -2186,7 +2303,7 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
               };
             } else {
               // Unknown threshold comparison
-              newResults[12] = {
+              newResults[13] = {
                 title: 'Emergency Recovery Mechanisms',
                 status: 'warning',
                 message: (
@@ -2227,7 +2344,7 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
         console.error('Error checking recovery mechanisms:', error);
         setResults(currentResults => {
           const newResults = [...currentResults];
-          newResults[12] = {
+          newResults[13] = {
             title: 'Emergency Recovery Mechanisms',
             status: 'warning',
             message: 'Could not check recovery mechanisms'
@@ -2243,7 +2360,7 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
 
           if (contractSigners.length === 0) {
             // All signers are EOAs (good)
-            newResults[13] = {
+            newResults[14] = {
               title: 'Contract Signers',
               status: 'success',
               message: 'No multisig signers are contracts. All signers are externally owned accounts (EOAs).'
@@ -2254,7 +2371,7 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
               ? contractSigners.slice(0, 3).join(', ') + ` and ${contractSigners.length - 3} more`
               : contractSigners.join(', ');
 
-            newResults[13] = {
+            newResults[14] = {
               title: 'Contract Signers',
               status: 'warning',
               message: `${contractSigners.length} signer${contractSigners.length === 1 ? '' : 's'} ${contractSigners.length === 1 ? 'is a contract' : 'are contracts'}, not EOA${contractSigners.length === 1 ? '' : 's'}. Need to recursively check those signers. Contract signers: ${contractList}`
