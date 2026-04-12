@@ -9,6 +9,7 @@ import { SUPPORTED_CHAINS, DEFAULT_CHAIN, CHAIN_ID_MAP, CHAIN_EXAMPLES, type Cha
 import { getTooltipInfo } from '../constants/tooltips';
 import { Search, Share2, Info, CheckCircle, AlertTriangle, XCircle, Loader2, Zap, ChevronDown, ShieldAlert, Shield } from 'lucide-react';
 import { cn, truncateHash } from '@/lib/utils';
+import { calculateSecurityScore, PENALTY_CONFIG, DEFAULT_PENALTY } from '@/lib/scoring';
 import { SpeedTest } from './SpeedTest';
 
 // Extended Error type for RPC failures
@@ -24,138 +25,6 @@ interface SecurityCheck {
   status: 'success' | 'warning' | 'error' | 'loading';
   message: string | React.ReactNode;
 }
-
-interface SecurityScore {
-  position: number; // 0-100 position on the bar for arrow placement
-  rating: 'High Risk' | 'Medium Risk' | 'Low Risk';
-  color: string;
-  description: string;
-  rawScore: number; // 0-100 base score
-  penalties: { title: string; points: number; isCritical: boolean }[];
-  criticalCount: number;
-}
-
-// Test penalty configuration - Algorithm 2: Cumulative Risk Penalty
-interface PenaltyConfig {
-  error: number;    // Points lost for error
-  warning: number;  // Points lost for warning
-  isCritical: boolean;
-  description: string;
-}
-
-const TEST_PENALTIES: Record<string, PenaltyConfig> = {
-  // CRITICAL: Core security controls - significant but not massive penalties
-  'Threshold': { 
-    error: 20, 
-    warning: 10, 
-    isCritical: true,
-    description: 'Number of signatures required to execute transactions'
-  },
-  'Owner Count': { 
-    error: 18, 
-    warning: 9, 
-    isCritical: true,
-    description: 'Total number of owners in the multisig'
-  },
-  'Fallback Handler': { 
-    error: 14, 
-    warning: 6, 
-    isCritical: false,
-    description: 'Handles token callbacks and fallback operations'
-  },
-  'Proxy Implementation': {
-    error: 18,
-    warning: 8,
-    isCritical: true,
-    description: 'The underlying Safe contract implementation'
-  },
-  
-  // HIGH: Important security features - moderate penalties  
-  'Guard': { 
-    error: 12, 
-    warning: 5, 
-    isCritical: false,
-    description: 'Transaction guard for additional checks'
-  },
-  'Modules': { 
-    error: 12, 
-    warning: 5, 
-    isCritical: false,
-    description: 'Extensions that can execute transactions'
-  },
-  'Contract Version': { 
-    error: 10, 
-    warning: 4, 
-    isCritical: false,
-    description: 'Safe singleton contract version'
-  },
-  'Signing Speed Analysis': { 
-    error: 16, 
-    warning: 8, 
-    isCritical: false,
-    description: 'Time between first and last signature (Heavily weighted - indicates potential centralization)'
-  },
-  
-  // STANDARD: Other checks - smaller penalties
-  'Owner Balance': { 
-    error: 6, 
-    warning: 3, 
-    isCritical: false,
-    description: 'ETH balance of owner addresses'
-  },
-  'Duplicate Owners': { 
-    error: 6, 
-    warning: 3, 
-    isCritical: false,
-    description: 'Check for duplicate owner addresses'
-  },
-  'Etherscan Verification': { 
-    error: 4, 
-    warning: 2, 
-    isCritical: false,
-    description: 'Contract source code verification'
-  },
-  
-  // LOW IMPACT: Informational checks - minimal penalties
-  'Emergency Recovery Mechanisms': { 
-    error: 2, 
-    warning: 1, 
-    isCritical: false,
-    description: 'Recovery modules for emergency access'
-  },
-  'Transaction Guard': { 
-    error: 2, 
-    warning: 1, 
-    isCritical: false,
-    description: 'Transaction guard for additional validation'
-  },
-  'Contract Signers': { 
-    error: 2, 
-    warning: 1, 
-    isCritical: false,
-    description: 'Check if signers are smart contracts'
-  },
-  'Safe Factory': {
-    error: 10,
-    warning: 4,
-    isCritical: false,
-    description: 'Checks if Safe was deployed by an official proxy factory'
-  },
-  'Chain Configuration': {
-    error: 2,
-    warning: 1,
-    isCritical: false,
-    description: 'Multi-chain deployment check'
-  },
-};
-
-// Default penalty for unknown tests
-const DEFAULT_PENALTY: PenaltyConfig = { 
-  error: 8, 
-  warning: 4, 
-  isCritical: false,
-  description: 'Security check'
-};
 
 
 // Safe Transaction Service API URLs
@@ -221,121 +90,6 @@ class EtherscanRateLimiter {
 
 // Global instance to be used across all Etherscan API calls
 const etherscanRateLimiter = new EtherscanRateLimiter();
-
-// Algorithm 2: Cumulative Risk Penalty
-// Start at 100, subtract penalties based on test failures
-// Critical failures have higher penalties and compound
-const calculateSecurityScore = (checks: SecurityCheck[]): SecurityScore => {
-  // Safety check for null/undefined checks array
-  if (!checks || !Array.isArray(checks)) {
-    return {
-      position: 0,
-      rating: 'High Risk',
-      color: 'text-red-600',
-      description: 'Analysis in progress...',
-      rawScore: 0,
-      penalties: [],
-      criticalCount: 0
-    };
-  }
-
-  const completedChecks = checks.filter(check => check && check.status && check.status !== 'loading');
-
-  if (completedChecks.length === 0) {
-    return {
-      position: 0,
-      rating: 'High Risk',
-      color: 'text-red-600',
-      description: 'Analysis in progress...',
-      rawScore: 0,
-      penalties: [],
-      criticalCount: 0
-    };
-  }
-
-  let score = 100;
-  let criticalFailures = 0;
-  let criticalWarnings = 0;
-  const penalties: { title: string; points: number; isCritical: boolean }[] = [];
-
-  completedChecks.forEach(check => {
-    const config = TEST_PENALTIES[check.title] || DEFAULT_PENALTY;
-    
-    if (check.status === 'error') {
-      score -= config.error;
-      penalties.push({ title: check.title, points: config.error, isCritical: config.isCritical });
-      if (config.isCritical) criticalFailures++;
-    } else if (check.status === 'warning') {
-      score -= config.warning;
-      penalties.push({ title: check.title, points: config.warning, isCritical: config.isCritical });
-      if (config.isCritical) criticalWarnings++;
-    }
-  });
-
-  // Compounding penalty for multiple critical issues (more lenient)
-  const totalCriticalIssues = criticalFailures + criticalWarnings;
-  if (totalCriticalIssues >= 3) {
-    score -= 8; // Small additional penalty for 3+ critical issues
-    penalties.push({ title: 'Multiple Critical Issues', points: 8, isCritical: true });
-  }
-  if (totalCriticalIssues >= 5) {
-    score -= 10; // Additional penalty for 5+ critical issues
-    penalties.push({ title: 'Severe Critical Issues', points: 10, isCritical: true });
-  }
-
-  // Clamp score between 0-100
-  const rawScore = Math.max(0, Math.min(100, score));
-
-  // Calculate position on slider (0-100)
-  // Use a curve that emphasizes the difference between good and bad scores
-  let position: number;
-  if (rawScore >= 65) {
-    // Good scores: 65-100 maps to 66-95 (Low Risk threshold lowered from 80 to 65)
-    position = 66 + (rawScore - 65) * 0.83;
-  } else if (rawScore >= 40) {
-    // Medium scores: 40-64 maps to 33-65 (Medium Risk threshold lowered from 50 to 40)
-    position = 33 + (rawScore - 40) * 1.28;
-  } else {
-    // Poor scores: 0-39 maps to 5-32
-    position = 5 + rawScore * 0.72;
-  }
-  position = Math.max(5, Math.min(95, position));
-
-  // Determine rating based on raw score (more lenient thresholds)
-  if (rawScore >= 65) {
-    return {
-      position,
-      rating: 'Low Risk',
-      color: 'text-green-600',
-      description: 'Your Safe follows security best practices with minimal issues.',
-      rawScore,
-      penalties: penalties.sort((a, b) => b.points - a.points),
-      criticalCount: totalCriticalIssues
-    };
-  } else if (rawScore >= 40) {
-    return {
-      position,
-      rating: 'Medium Risk',
-      color: 'text-yellow-600',
-      description: 'Your Safe has moderate security risks that should be addressed.',
-      rawScore,
-      penalties: penalties.sort((a, b) => b.points - a.points),
-      criticalCount: totalCriticalIssues
-    };
-  } else {
-    return {
-      position,
-      rating: 'High Risk',
-      color: 'text-red-600',
-      description: 'Your Safe has significant security risks that need immediate attention.',
-      rawScore,
-      penalties: penalties.sort((a, b) => b.points - a.points),
-      criticalCount: totalCriticalIssues
-    };
-  }
-};
-
-
 
 
 
@@ -1555,19 +1309,24 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
 
       // Update Signer Threshold (using already validated threshold)
       const thresholdNum = Number(threshold);
+      const ownerCount = owners.length;
+      const thresholdPct = ownerCount > 0 ? (thresholdNum / ownerCount) * 100 : 0;
+      const thresholdStatus: 'error' | 'warning' | 'success' =
+        thresholdNum === 1 ? 'error'
+        : thresholdNum <= 3 && thresholdPct < 51 ? 'warning'
+        : 'success';
       updatedResults[1] = {
         title: 'Signer Threshold',
-        status: thresholdNum === 1 ? 'error' : thresholdNum <= 3 ? 'warning' : 'success',
+        status: thresholdStatus,
         message: thresholdNum === 1
           ? `Single signature requirement is insecure. Only ${thresholdNum} signature is required to execute transactions.`
-          : thresholdNum <= 3
-            ? `Low signature threshold detected. ${thresholdNum} signatures are required to execute transactions.`
-            : `Good signature threshold. ${thresholdNum} signatures are required to execute transactions.`
+          : thresholdStatus === 'warning'
+            ? `Low signature threshold detected. ${thresholdNum} of ${ownerCount} signatures required to execute transactions.`
+            : `Good signature threshold. ${thresholdNum} of ${ownerCount} signatures required to execute transactions.`
       };
       setResults([...updatedResults]);
 
       // Update Signer threshold percentage (using already validated owners)
-      const ownerCount = owners.length;
       const thresholdPercentage = (thresholdNum / ownerCount) * 100;
       updatedResults[2] = {
         title: 'Signer Threshold Percentage',
@@ -2144,48 +1903,61 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
         });
       });
 
-      // Update Signing Speed Analysis - fetch data first to determine status, then render
-      fetchSigningSpeedData(addressToAnalyze, selectedChain.id).then(speedData => {
+      // Update Signing Speed Analysis (skip for 1-of-N — single signer always has zero
+      // duration, and the threshold check already penalizes this configuration)
+      if (thresholdNum > 1) {
+        fetchSigningSpeedData(addressToAnalyze, selectedChain.id).then(speedData => {
+          setResults(currentResults => {
+            const newResults = [...currentResults];
+
+            if (speedData.error) {
+              // Error fetching data
+              newResults[0] = {
+                title: 'Signing Speed Analysis',
+                status: 'warning',
+                message: `Could not analyze signing speed: ${speedData.error}`
+              };
+            } else if (speedData.avgDuration !== null) {
+              // Determine status based on average duration
+              // < 10 min = error (too fast), < 6 hours = warning, >= 6 hours = success
+              const status = speedData.avgDuration < 600 ? 'error' :
+                            speedData.avgDuration < 21600 ? 'warning' : 'success';
+
+              newResults[0] = {
+                title: 'Signing Speed Analysis',
+                status,
+                message: (
+                  <SpeedTest
+                    address={addressToAnalyze}
+                    chainId={selectedChain.id}
+                    chainName={selectedChain.name}
+                    explorerUrl={selectedChain.explorerUrl}
+                  />
+                )
+              };
+            } else {
+              // No data available
+              newResults[0] = {
+                title: 'Signing Speed Analysis',
+                status: 'warning',
+                message: 'No transaction data available for signing speed analysis'
+              };
+            }
+
+            return newResults;
+          });
+        });
+      } else {
         setResults(currentResults => {
           const newResults = [...currentResults];
-          
-          if (speedData.error) {
-            // Error fetching data
-            newResults[0] = {
-              title: 'Signing Speed Analysis',
-              status: 'warning',
-              message: `Could not analyze signing speed: ${speedData.error}`
-            };
-          } else if (speedData.avgDuration !== null) {
-            // Determine status based on average duration
-            // < 10 min = error (too fast), < 6 hours = warning, >= 6 hours = success
-            const status = speedData.avgDuration < 600 ? 'error' : 
-                          speedData.avgDuration < 21600 ? 'warning' : 'success';
-            
-            newResults[0] = {
-              title: 'Signing Speed Analysis',
-              status,
-              message: (
-                <SpeedTest 
-                  address={addressToAnalyze} 
-                  chainId={selectedChain.id} 
-                  chainName={selectedChain.name}
-                  explorerUrl={selectedChain.explorerUrl}
-                />
-              )
-            };
-          } else {
-            // No data available
-            newResults[0] = {
-              title: 'Signing Speed Analysis',
-              status: 'warning',
-              message: 'No transaction data available for signing speed analysis'
-            };
-          }
-          
+          newResults[0] = {
+            title: 'Signing Speed Analysis',
+            status: 'success',
+            message: 'Signing speed analysis skipped for single-signer Safe (threshold is 1).'
+          };
           return newResults;
         });
-      });
+      }
 
       // Update Emergency Recovery Mechanisms when ready
       recoveryPromise.then(({ hasRecoveryModule, recoveryModules, recoveryThreshold, normalThreshold, thresholdComparison }) => {
@@ -2796,7 +2568,7 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
                             <ul className="space-y-1">
                               <li className="flex items-center gap-1.5">
                                 <ShieldAlert className="h-3 w-3 text-[var(--color-error)]" />
-                                <span><strong>Critical checks</strong> (Threshold, Owner Count, Proxy Implementation): Errors cost 18-20 points</span>
+                                <span><strong>Critical checks</strong> (Signer Threshold, Threshold Percentage): Errors cost 18-20 points</span>
                               </li>
                               <li className="flex items-center gap-1.5">
                                 <Shield className="h-3 w-3 text-[var(--color-warning)]" />
@@ -2825,7 +2597,7 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
 
               // Special rendering for Signing Speed Analysis - it renders its own container
               if (result.title === 'Signing Speed Analysis') {
-                const speedPenaltyConfig = TEST_PENALTIES[result.title] || DEFAULT_PENALTY;
+                const speedPenaltyConfig = PENALTY_CONFIG[result.title] || DEFAULT_PENALTY;
                 return (
                   <div key={index}>
                     {result.status === 'loading' ? (
@@ -2857,7 +2629,7 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
             const tooltipInfo = getTooltipInfo(result.title);
             const isTooltipOpen = openTooltip === index;
 
-            const penaltyConfig = TEST_PENALTIES[result.title] || DEFAULT_PENALTY;
+            const penaltyConfig = PENALTY_CONFIG[result.title] || DEFAULT_PENALTY;
 
             return (
               <div

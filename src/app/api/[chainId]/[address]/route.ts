@@ -3,6 +3,7 @@ import { createPublicClient, http, isAddress, getAddress } from 'viem';
 import { multicall } from 'viem/actions';
 import { GNOSIS_SAFE_ABI, OFFICIAL_SAFE_FALLBACK_HANDLERS, OFFICIAL_SAFE_PROXY_FACTORIES, SAFE_VERSIONS_WITH_KNOWN_FACTORIES } from '@/constants/contracts';
 import { SUPPORTED_CHAINS } from '@/constants/chains';
+import { calculateSecurityScore } from '@/lib/scoring';
 
 interface SecurityCheck {
   id: string;
@@ -59,6 +60,19 @@ const safeVersionCache: { latestVersion: string | null; fetchedAt: number } = {
   fetchedAt: 0,
 };
 const SAFE_VERSION_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+
+// Security check thresholds
+const SIGNING_SPEED_ERROR_SECONDS = 600;       // 10 minutes — too fast, indicates centralization
+const SIGNING_SPEED_WARNING_SECONDS = 21600;   // 6 hours — moderate review time
+const THRESHOLD_LOW_ABSOLUTE = 3;              // Absolute threshold at or below this triggers review
+const THRESHOLD_MAJORITY_PCT = 51;             // Percentage required for majority approval
+const THRESHOLD_LOW_PCT = 34;                  // Percentage below this is critically low
+const NONCE_ERROR_MAX = 3;                     // Nonce at or below this = very low usage
+const NONCE_WARNING_MAX = 10;                  // Nonce at or below this = low usage
+const CONTRACT_AGE_ERROR_DAYS = 7;             // Deployed within this many days = high risk
+const CONTRACT_AGE_WARNING_DAYS = 60;          // Deployed within this many days = moderate risk
+const INACTIVITY_ERROR_DAYS = 90;              // No transactions in this many days = error
+const INACTIVITY_WARNING_DAYS = 31;            // No transactions in this many days = warning
 
 
 export async function GET(
@@ -356,7 +370,7 @@ export async function GET(
         fallbackHandler
       },
       securityScore: {
-        score: securityScore.score,
+        score: securityScore.rawScore,
         rating: securityScore.rating,
         position: securityScore.position,
         description: securityScore.description,
@@ -461,8 +475,7 @@ async function checkSigningSpeed(address: string, chainId: number): Promise<Secu
     }
 
     const avgDuration = totalDuration / validTxCount;
-    // < 10 min = error (too fast, indicates centralization), < 6 hours = warning, >= 6 hours = success
-    const status = avgDuration < 600 ? 'error' : avgDuration < 21600 ? 'warning' : 'success';
+    const status = avgDuration < SIGNING_SPEED_ERROR_SECONDS ? 'error' : avgDuration < SIGNING_SPEED_WARNING_SECONDS ? 'warning' : 'success';
 
     const formatDuration = (seconds: number): string => {
       if (seconds < 60) return `${Math.round(seconds)} seconds`;
@@ -583,20 +596,28 @@ async function performAllSecurityChecks(params: {
   const { address, chainId, version, threshold, owners, nonce, modules, guard, fallbackHandler, client } = params;
   const checks: SecurityCheck[] = [];
 
-  // 1. Signing Speed Analysis
-  const signingSpeedCheck = await checkSigningSpeed(address, chainId);
-  checks.push(signingSpeedCheck);
+  // 1. Signing Speed Analysis (skip for 1-of-N — single signer always has zero duration,
+  //    and the threshold check already penalizes this configuration)
+  if (threshold > 1) {
+    const signingSpeedCheck = await checkSigningSpeed(address, chainId);
+    checks.push(signingSpeedCheck);
+  }
 
   // 2. Signer Threshold
+  const thresholdPct = owners.length > 0 ? (threshold / owners.length) * 100 : 0;
+  const thresholdStatus: 'error' | 'warning' | 'success' =
+    threshold === 1 ? 'error'
+    : threshold <= THRESHOLD_LOW_ABSOLUTE && thresholdPct < THRESHOLD_MAJORITY_PCT ? 'warning'
+    : 'success';
   checks.push({
     id: 'signer_threshold',
     title: 'Signer Threshold',
-    status: threshold === 1 ? 'error' : threshold <= 3 ? 'warning' : 'success',
-    message: threshold === 1 
+    status: thresholdStatus,
+    message: threshold === 1
       ? `Single signature requirement is insecure. Only ${threshold} signature is required to execute transactions.`
-      : threshold <= 3 
-        ? `Low signature threshold detected. ${threshold} signatures are required to execute transactions.`
-        : `Good signature threshold. ${threshold} signatures are required to execute transactions.`,
+      : thresholdStatus === 'warning'
+        ? `Low signature threshold detected. ${threshold} of ${owners.length} signatures required to execute transactions.`
+        : `Good signature threshold. ${threshold} of ${owners.length} signatures required to execute transactions.`,
     details: { threshold, owners: owners.length }
   });
 
@@ -605,7 +626,7 @@ async function performAllSecurityChecks(params: {
   checks.push({
     id: 'signer_threshold_percentage',
     title: 'Signer Threshold Percentage',
-    status: thresholdPercentage < 34 ? 'error' : thresholdPercentage < 51 ? 'warning' : 'success',
+    status: thresholdPercentage < THRESHOLD_LOW_PCT ? 'error' : thresholdPercentage < THRESHOLD_MAJORITY_PCT ? 'warning' : 'success',
     message: thresholdPercentage < 34
       ? `Low threshold percentage: only ${thresholdPercentage.toFixed(1)}% of owners (${threshold}/${owners.length}) required. Consider increasing signer threshold or reducing owners.`
       : thresholdPercentage < 51
@@ -626,10 +647,10 @@ async function performAllSecurityChecks(params: {
   checks.push({
     id: 'multisig_nonce',
     title: 'Multisig Nonce',
-    status: nonce <= 3 ? 'error' : nonce <= 10 ? 'warning' : 'success',
-    message: nonce <= 3
+    status: nonce <= NONCE_ERROR_MAX ? 'error' : nonce <= NONCE_WARNING_MAX ? 'warning' : 'success',
+    message: nonce <= NONCE_ERROR_MAX
       ? `Very low usage: only ${nonce} transaction${nonce !== 1 ? 's' : ''} executed.`
-      : nonce <= 10
+      : nonce <= NONCE_WARNING_MAX
         ? `Low usage: ${nonce} transactions executed.`
         : `Active usage: ${nonce} transactions executed.`,
     details: { nonce }
@@ -799,10 +820,10 @@ async function checkContractCreationDate(address: string, chainId: number): Prom
     let status: 'success' | 'warning' | 'error' = 'success';
     let message = '';
 
-    if (daysAgo <= 7) {
+    if (daysAgo <= CONTRACT_AGE_ERROR_DAYS) {
       status = 'error';
       message = `Very recently deployed (${daysAgo} days ago). New contracts carry higher risk.`;
-    } else if (daysAgo <= 60) {
+    } else if (daysAgo <= CONTRACT_AGE_WARNING_DAYS) {
       status = 'warning';
       message = `Recently deployed (${daysAgo} days ago). Relatively new contract.`;
     } else {
@@ -869,10 +890,10 @@ async function checkLastTransactionDate(address: string, chainId: number, nonce:
     let status: 'success' | 'warning' | 'error' = 'success';
     let message = '';
 
-    if (daysAgo >= 90) {
+    if (daysAgo >= INACTIVITY_ERROR_DAYS) {
       status = 'error';
       message = `Inactive for ${daysAgo} days. Last transaction: ${lastDate.toDateString()}`;
-    } else if (daysAgo >= 31) {
+    } else if (daysAgo >= INACTIVITY_WARNING_DAYS) {
       status = 'warning';
       message = `Last used ${daysAgo} days ago on ${lastDate.toDateString()}`;
     } else {
@@ -1049,90 +1070,3 @@ async function checkMultiChainSigners(address: string, owners: string[], current
   };
 }
 
-// Test penalty configuration - matches web app's Cumulative Risk Penalty algorithm
-const TEST_PENALTIES: Record<string, { error: number; warning: number; isCritical: boolean }> = {
-  'Threshold': { error: 20, warning: 10, isCritical: true },
-  'Signer Threshold': { error: 20, warning: 10, isCritical: true },
-  'Owner Count': { error: 18, warning: 9, isCritical: true },
-  'Signer Threshold Percentage': { error: 18, warning: 9, isCritical: true },
-  'Fallback Handler': { error: 14, warning: 6, isCritical: false },
-  'Proxy Implementation': { error: 18, warning: 8, isCritical: true },
-  'Guard': { error: 12, warning: 5, isCritical: false },
-  'Transaction Guard': { error: 12, warning: 5, isCritical: false },
-  'Modules': { error: 12, warning: 5, isCritical: false },
-  'Optional Modules': { error: 12, warning: 5, isCritical: false },
-  'Contract Version': { error: 10, warning: 4, isCritical: false },
-  'Safe Version': { error: 10, warning: 4, isCritical: false },
-  'Signing Speed Analysis': { error: 16, warning: 8, isCritical: false },
-  'Owner Balance': { error: 6, warning: 3, isCritical: false },
-  'Duplicate Owners': { error: 6, warning: 3, isCritical: false },
-  'Etherscan Verification': { error: 4, warning: 2, isCritical: false },
-  'Emergency Recovery Mechanisms': { error: 2, warning: 1, isCritical: false },
-  'Contract Signers': { error: 2, warning: 1, isCritical: false },
-  'Safe Factory': { error: 10, warning: 4, isCritical: false },
-  'Chain Configuration': { error: 2, warning: 1, isCritical: false },
-};
-
-const DEFAULT_PENALTY = { error: 8, warning: 4, isCritical: false };
-
-// Calculate security score (same algorithm as web app - Cumulative Risk Penalty)
-function calculateSecurityScore(checks: SecurityCheck[]) {
-  let score = 100;
-  let criticalFailures = 0;
-  let criticalWarnings = 0;
-  const penalties: { title: string; points: number; isCritical: boolean }[] = [];
-
-  for (const check of checks) {
-    const config = TEST_PENALTIES[check.title] || DEFAULT_PENALTY;
-
-    if (check.status === 'error') {
-      score -= config.error;
-      penalties.push({ title: check.title, points: config.error, isCritical: config.isCritical });
-      if (config.isCritical) criticalFailures++;
-    } else if (check.status === 'warning') {
-      score -= config.warning;
-      penalties.push({ title: check.title, points: config.warning, isCritical: config.isCritical });
-      if (config.isCritical) criticalWarnings++;
-    }
-  }
-
-  // Compounding penalty for multiple critical issues
-  const totalCriticalIssues = criticalFailures + criticalWarnings;
-  if (totalCriticalIssues >= 3) {
-    score -= 8;
-    penalties.push({ title: 'Multiple Critical Issues', points: 8, isCritical: true });
-  }
-  if (totalCriticalIssues >= 5) {
-    score -= 10;
-    penalties.push({ title: 'Severe Critical Issues', points: 10, isCritical: true });
-  }
-
-  const rawScore = Math.max(0, Math.min(100, score));
-
-  // Position on slider with curve that emphasizes good vs bad
-  let position: number;
-  if (rawScore >= 65) {
-    position = 66 + (rawScore - 65) * 0.83;
-  } else if (rawScore >= 40) {
-    position = 33 + (rawScore - 40) * 1.28;
-  } else {
-    position = 5 + rawScore * 0.72;
-  }
-  position = Math.max(5, Math.min(95, position));
-
-  let rating: 'High Risk' | 'Medium Risk' | 'Low Risk';
-  let description: string;
-
-  if (rawScore >= 65) {
-    rating = 'Low Risk';
-    description = 'Your Safe follows security best practices with minimal issues.';
-  } else if (rawScore >= 40) {
-    rating = 'Medium Risk';
-    description = 'Your Safe has moderate security risks that should be addressed.';
-  } else {
-    rating = 'High Risk';
-    description = 'Your Safe has significant security risks that need immediate attention.';
-  }
-
-  return { score: rawScore, rating, position, description, penalties: penalties.sort((a, b) => b.points - a.points), criticalCount: totalCriticalIssues };
-}
