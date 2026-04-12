@@ -5,7 +5,7 @@ import { createPublicClient, http, isAddress, getAddress } from 'viem';
 import { multicall } from 'viem/actions';
 import Safe from '@safe-global/protocol-kit';
 import { GNOSIS_SAFE_ABI, OFFICIAL_SAFE_FALLBACK_HANDLERS, OFFICIAL_SAFE_PROXY_FACTORIES, SAFE_VERSIONS_WITH_KNOWN_FACTORIES, SENTINEL_MODULES_ADDRESS } from '../constants/contracts';
-import { SUPPORTED_CHAINS, DEFAULT_CHAIN, CHAIN_ID_MAP, CHAIN_EXAMPLES, type ChainConfig } from '../constants/chains';
+import { SUPPORTED_CHAINS, DEFAULT_CHAIN, CHAIN_ID_MAP, CHAIN_EXAMPLES, SAFE_TX_SERVICE_URLS, SAFE_GITHUB_RELEASES_URL, type ChainConfig } from '../constants/chains';
 import { getTooltipInfo } from '../constants/tooltips';
 import { Search, Share2, Info, CheckCircle, AlertTriangle, XCircle, Loader2, Zap, ChevronDown, ShieldAlert, Shield } from 'lucide-react';
 import { cn, truncateHash } from '@/lib/utils';
@@ -28,16 +28,6 @@ interface SecurityCheck {
 
 
 // Safe Transaction Service API URLs
-const SAFE_API_URLS: Record<number, string> = {
-  1: 'https://safe-transaction-mainnet.safe.global',
-  56: 'https://safe-transaction-bsc.safe.global',
-  137: 'https://safe-transaction-polygon.safe.global',
-  42161: 'https://safe-transaction-arbitrum.safe.global',
-  10: 'https://safe-transaction-optimism.safe.global',
-  8453: 'https://safe-transaction-base.safe.global',
-  747474: 'https://safe-transaction-katana.safe.global',
-};
-
 // Cache for Safe version info fetched from GitHub (shared across analyses)
 const safeVersionCache: {
   data: { latestVersion: string | null; secondLatestVersion: string | null; latestReleaseDate: Date | null } | null;
@@ -190,7 +180,7 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
     }
 
     try {
-      const response = await fetch('https://api.github.com/repos/safe-global/safe-smart-account/releases', {
+      const response = await fetch(SAFE_GITHUB_RELEASES_URL, {
         headers: {
           'Accept': 'application/json',
         },
@@ -1141,7 +1131,7 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
 
   // Helper function to fetch signing speed data for status determination
   const fetchSigningSpeedData = async (address: string, chainId: number): Promise<{ avgDuration: number | null; error?: string }> => {
-    const baseUrl = SAFE_API_URLS[chainId];
+    const baseUrl = SAFE_TX_SERVICE_URLS[chainId];
     if (!baseUrl) {
       return { avgDuration: null, error: 'Unsupported chain' };
     }
@@ -1204,7 +1194,7 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
   }> => {
     const versionHasKnownFactories = SAFE_VERSIONS_WITH_KNOWN_FACTORIES.has(safeVersion);
 
-    const baseUrl = SAFE_API_URLS[chainId];
+    const baseUrl = SAFE_TX_SERVICE_URLS[chainId];
     if (!baseUrl) {
       return { factoryAddress: null, factoryName: null, isOfficial: null, versionHasKnownFactories, error: 'Unsupported chain' };
     }

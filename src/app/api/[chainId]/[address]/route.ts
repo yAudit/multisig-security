@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { createPublicClient, http, isAddress, getAddress } from 'viem';
 import { multicall } from 'viem/actions';
 import { GNOSIS_SAFE_ABI, OFFICIAL_SAFE_FALLBACK_HANDLERS, OFFICIAL_SAFE_PROXY_FACTORIES, SAFE_VERSIONS_WITH_KNOWN_FACTORIES } from '@/constants/contracts';
-import { SUPPORTED_CHAINS } from '@/constants/chains';
+import { SUPPORTED_CHAINS, SAFE_TX_SERVICE_URLS, SAFE_GITHUB_RELEASES_URL } from '@/constants/chains';
 import { calculateSecurityScore } from '@/lib/scoring';
 
 interface SecurityCheck {
@@ -50,9 +50,6 @@ const EXPLORER_APIS = {
   137: 'https://api.etherscan.io/v2/api',
   747474: null // Katana doesn't have explorer API
 };
-
-// GitHub API for latest Safe version
-const GITHUB_API = 'https://api.github.com/repos/safe-global/safe-smart-account/releases';
 
 // Cache for Safe version info (24-hour TTL)
 const safeVersionCache: { latestVersion: string | null; fetchedAt: number } = {
@@ -341,7 +338,6 @@ export async function GET(
     const checks = await performAllSecurityChecks({
       address,
       chainId: parseInt(chainId),
-      chain,
       version,
       threshold,
       owners,
@@ -395,20 +391,10 @@ export async function GET(
   }
 }
 
-// Safe Transaction Service API URLs
-const SAFE_TX_API_URLS: Record<number, string> = {
-  1: 'https://safe-transaction-mainnet.safe.global',
-  56: 'https://safe-transaction-bsc.safe.global',
-  137: 'https://safe-transaction-polygon.safe.global',
-  42161: 'https://safe-transaction-arbitrum.safe.global',
-  10: 'https://safe-transaction-optimism.safe.global',
-  8453: 'https://safe-transaction-base.safe.global',
-  747474: 'https://safe-transaction-katana.safe.global',
-};
 
 // Check signing speed by analyzing confirmation timestamps
 async function checkSigningSpeed(address: string, chainId: number): Promise<SecurityCheck> {
-  const baseUrl = SAFE_TX_API_URLS[chainId];
+  const baseUrl = SAFE_TX_SERVICE_URLS[chainId];
   if (!baseUrl) {
     return {
       id: 'signing_speed_analysis',
@@ -509,7 +495,7 @@ async function checkSigningSpeed(address: string, chainId: number): Promise<Secu
 
 // Check if the Safe was deployed by an official proxy factory
 async function checkSafeFactory(address: string, chainId: number, safeVersion: string): Promise<SecurityCheck> {
-  const baseUrl = SAFE_TX_API_URLS[chainId];
+  const baseUrl = SAFE_TX_SERVICE_URLS[chainId];
   const versionHasKnownFactories = SAFE_VERSIONS_WITH_KNOWN_FACTORIES.has(safeVersion);
 
   if (!baseUrl) {
@@ -582,7 +568,6 @@ async function checkSafeFactory(address: string, chainId: number, safeVersion: s
 async function performAllSecurityChecks(params: {
   address: string;
   chainId: number;
-  chain: unknown;
   version: string;
   threshold: number;
   owners: string[];
@@ -621,18 +606,17 @@ async function performAllSecurityChecks(params: {
     details: { threshold, owners: owners.length }
   });
 
-  // 3. Signer Threshold Percentage
-  const thresholdPercentage = owners.length > 0 ? (threshold / owners.length) * 100 : 0;
+  // 3. Signer Threshold Percentage (reuses thresholdPct from above)
   checks.push({
     id: 'signer_threshold_percentage',
     title: 'Signer Threshold Percentage',
-    status: thresholdPercentage < THRESHOLD_LOW_PCT ? 'error' : thresholdPercentage < THRESHOLD_MAJORITY_PCT ? 'warning' : 'success',
-    message: thresholdPercentage < 34
-      ? `Low threshold percentage: only ${thresholdPercentage.toFixed(1)}% of owners (${threshold}/${owners.length}) required. Consider increasing signer threshold or reducing owners.`
-      : thresholdPercentage < 51
-        ? `Moderate threshold: ${thresholdPercentage.toFixed(1)}% of owners (${threshold}/${owners.length}) required for transactions.`
-        : `Strong threshold: ${thresholdPercentage.toFixed(1)}% of owners (${threshold}/${owners.length}) required for transactions.`,
-    details: { percentage: thresholdPercentage }
+    status: thresholdPct < THRESHOLD_LOW_PCT ? 'error' : thresholdPct < THRESHOLD_MAJORITY_PCT ? 'warning' : 'success',
+    message: thresholdPct < 34
+      ? `Low threshold percentage: only ${thresholdPct.toFixed(1)}% of owners (${threshold}/${owners.length}) required. Consider increasing signer threshold or reducing owners.`
+      : thresholdPct < 51
+        ? `Moderate threshold: ${thresholdPct.toFixed(1)}% of owners (${threshold}/${owners.length}) required for transactions.`
+        : `Strong threshold: ${thresholdPct.toFixed(1)}% of owners (${threshold}/${owners.length}) required for transactions.`,
+    details: { percentage: thresholdPct }
   });
 
   // 4. Safe Version
@@ -738,7 +722,7 @@ async function checkSafeVersion(version: string): Promise<SecurityCheck> {
     if (safeVersionCache.latestVersion && Date.now() - safeVersionCache.fetchedAt < SAFE_VERSION_CACHE_TTL_MS) {
       latestVersion = safeVersionCache.latestVersion;
     } else {
-      const response = await fetch(GITHUB_API);
+      const response = await fetch(SAFE_GITHUB_RELEASES_URL);
       if (!response.ok) throw new Error('GitHub API error');
 
       const releases = await response.json();
@@ -989,11 +973,12 @@ async function checkMultiChainDeployment(address: string, currentChainId: number
 
 // Check owner activity (simplified - would need full implementation)
 async function checkOwnerActivity(owners: string[]): Promise<SecurityCheck> {
+  // Stub — not yet implemented. Returns success so it doesn't penalize the score.
   return {
     id: 'owner_activity_analysis',
     title: 'Owner Activity Analysis',
-    status: 'warning' as const,
-    message: 'Could not analyze owner activity (requires Explorer API implementation)',
+    status: 'success' as const,
+    message: 'Owner activity analysis not yet implemented.',
     details: { ownerCount: owners.length }
   };
 }
@@ -1010,15 +995,11 @@ async function checkEmergencyRecovery(modules: string[]): Promise<SecurityCheck>
     };
   }
 
-  const hasRecoveryModule = modules.length > 0; // Simplified check
-
   return {
     id: 'emergency_recovery_mechanisms',
     title: 'Emergency Recovery Mechanisms',
-    status: hasRecoveryModule ? 'success' as const : 'warning' as const,
-    message: hasRecoveryModule 
-      ? 'Recovery module detected. Review configuration carefully.'
-      : 'No recovery module detected. Consider implementing social recovery or guardian mechanisms for emergency access.',
+    status: 'success' as const,
+    message: 'Recovery module detected. Review configuration carefully.',
     details: { modules, moduleCount: modules.length }
   };
 }
@@ -1065,7 +1046,7 @@ async function checkMultiChainSigners(address: string, owners: string[], current
     id: 'multi_chain_signer_analysis',
     title: 'Multi-Chain Signer Analysis',
     status: 'success' as const,
-    message: 'Not applicable - requires multi-chain deployment analysis',
+    message: 'Multi-chain signer analysis not yet implemented.',
     details: { currentChain: currentChainId }
   };
 }

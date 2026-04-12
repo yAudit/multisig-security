@@ -19,7 +19,11 @@ export interface ChainConfig {
   backupRpcUrl: string;
   explorerApiUrl: string;
   explorerUrl: string;
+  safeTransactionServiceUrl?: string;
 }
+
+// GitHub API for latest Safe version
+export const SAFE_GITHUB_RELEASES_URL = 'https://api.github.com/repos/safe-global/safe-smart-account/releases';
 
 export const CHAIN_ID_MAP = {
   'Ethereum': 1,
@@ -40,7 +44,8 @@ export const SUPPORTED_CHAINS: ChainConfig[] = [
     rpcUrl: 'https://eth.meowrpc.com',
     backupRpcUrl: 'https://eth.drpc.org',
     explorerApiUrl: 'https://api.etherscan.io/v2/api',
-    explorerUrl: 'https://etherscan.io'
+    explorerUrl: 'https://etherscan.io',
+    safeTransactionServiceUrl: 'https://safe-transaction-mainnet.safe.global'
   },
   {
     id: 8453,
@@ -49,7 +54,8 @@ export const SUPPORTED_CHAINS: ChainConfig[] = [
     rpcUrl: 'https://base.meowrpc.com',
     backupRpcUrl: 'https://base.drpc.org',
     explorerApiUrl: 'https://api.etherscan.io/v2/api',
-    explorerUrl: 'https://basescan.org'
+    explorerUrl: 'https://basescan.org',
+    safeTransactionServiceUrl: 'https://safe-transaction-base.safe.global'
   },
   {
     id: 42161,
@@ -58,7 +64,8 @@ export const SUPPORTED_CHAINS: ChainConfig[] = [
     rpcUrl: 'https://arbitrum.drpc.org',
     backupRpcUrl: 'https://arb1.arbitrum.io/rpc',
     explorerApiUrl: 'https://api.etherscan.io/v2/api',
-    explorerUrl: 'https://arbiscan.io'
+    explorerUrl: 'https://arbiscan.io',
+    safeTransactionServiceUrl: 'https://safe-transaction-arbitrum.safe.global'
   },
   {
     id: 10,
@@ -67,7 +74,8 @@ export const SUPPORTED_CHAINS: ChainConfig[] = [
     rpcUrl: 'https://optimism.drpc.org',
     backupRpcUrl: 'https://mainnet.optimism.io',
     explorerApiUrl: 'https://api.etherscan.io/v2/api',
-    explorerUrl: 'https://optimistic.etherscan.io'
+    explorerUrl: 'https://optimistic.etherscan.io',
+    safeTransactionServiceUrl: 'https://safe-transaction-optimism.safe.global'
   },
   {
     id: 137,
@@ -76,7 +84,8 @@ export const SUPPORTED_CHAINS: ChainConfig[] = [
     rpcUrl: 'https://polygon.drpc.org',
     backupRpcUrl: 'https://polygon-rpc.com',
     explorerApiUrl: 'https://api.etherscan.io/v2/api',
-    explorerUrl: 'https://polygonscan.com'
+    explorerUrl: 'https://polygonscan.com',
+    safeTransactionServiceUrl: 'https://safe-transaction-polygon.safe.global'
   },
   {
     id: 56,
@@ -85,7 +94,8 @@ export const SUPPORTED_CHAINS: ChainConfig[] = [
     rpcUrl: 'https://1rpc.io/bnb',
     backupRpcUrl: 'https://bsc-dataseed.binance.org',
     explorerApiUrl: 'https://api.etherscan.io/v2/api',
-    explorerUrl: 'https://bscscan.com'
+    explorerUrl: 'https://bscscan.com',
+    safeTransactionServiceUrl: 'https://safe-transaction-bsc.safe.global'
   },
   {
     id: 146,
@@ -103,11 +113,19 @@ export const SUPPORTED_CHAINS: ChainConfig[] = [
     rpcUrl: 'https://rpc.katana.network',
     backupRpcUrl: 'https://katana.drpc.org',
     explorerApiUrl: 'https://api.etherscan.io/v2/api',
-    explorerUrl: 'https://katanascan.com/'
+    explorerUrl: 'https://katanascan.com/',
+    safeTransactionServiceUrl: 'https://safe-transaction-katana.safe.global'
   }
 ];
 
 export const DEFAULT_CHAIN = SUPPORTED_CHAINS[0]; // Ethereum
+
+// Lookup map: chain ID → Safe Transaction Service URL (undefined if not available)
+export const SAFE_TX_SERVICE_URLS: Record<number, string> = Object.fromEntries(
+  SUPPORTED_CHAINS
+    .filter(c => c.safeTransactionServiceUrl)
+    .map(c => [c.id, c.safeTransactionServiceUrl!])
+);
 
 export interface ExampleMultisig {
   address: string;

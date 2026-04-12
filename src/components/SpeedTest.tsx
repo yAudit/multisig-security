@@ -13,17 +13,7 @@ import {
   Zap
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
-
-// Safe Transaction Service API URLs by chain
-const SAFE_API_URLS: Record<number, string> = {
-  1: 'https://safe-transaction-mainnet.safe.global',
-  56: 'https://safe-transaction-bsc.safe.global',
-  137: 'https://safe-transaction-polygon.safe.global',
-  42161: 'https://safe-transaction-arbitrum.safe.global',
-  10: 'https://safe-transaction-optimism.safe.global',
-  8453: 'https://safe-transaction-base.safe.global',
-  747474: 'https://safe-transaction-katana.safe.global',
-};
+import { SAFE_TX_SERVICE_URLS } from '../constants/chains';
 
 interface Confirmation {
   owner: string;
@@ -174,7 +164,7 @@ function getMinGapClass(gapSeconds: number): string {
 }
 
 async function fetchAndAnalyzeSafe(address: string, chainId: number): Promise<AnalysisResult> {
-  const apiUrl = SAFE_API_URLS[chainId];
+  const apiUrl = SAFE_TX_SERVICE_URLS[chainId];
   if (!apiUrl) {
     throw new Error(`Chain ${chainId} not supported for speed test`);
   }
