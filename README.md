@@ -63,6 +63,12 @@ GET /api/[chainId]/[address]
 - `chainId`: numeric ID from `SUPPORTED_CHAINS` (1, 56, 8453, 42161, 10, 137, 747474).
 - `address`: Safe contract address (checksum format preferred).
 
+Example request:
+
+```bash
+curl http://localhost:3000/api/1/0x73b047fe6337183A454c5217241D780a932777bD/
+```
+
 Response payload:
 
 - `safeInfo`: version, threshold, owners, nonce, modules, guard, fallback handler.
