@@ -1,9 +1,21 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createPublicClient, http, isAddress, getAddress } from 'viem';
 import { multicall } from 'viem/actions';
-import { GNOSIS_SAFE_ABI, OFFICIAL_SAFE_FALLBACK_HANDLERS, OFFICIAL_SAFE_PROXY_FACTORIES, SAFE_VERSIONS_WITH_KNOWN_FACTORIES } from '@/constants/contracts';
+import { GNOSIS_SAFE_ABI, OFFICIAL_SAFE_FALLBACK_HANDLERS, OFFICIAL_SAFE_PROXY_FACTORIES, SAFE_VERSIONS_WITH_KNOWN_FACTORIES, SENTINEL_MODULES_ADDRESS } from '@/constants/contracts';
 import { SUPPORTED_CHAINS, SAFE_TX_SERVICE_URLS, SAFE_GITHUB_RELEASES_URL } from '@/constants/chains';
 import { calculateSecurityScore } from '@/lib/scoring';
+
+// Helper to detect if an error is a contract revert (not an RPC issue)
+const isContractRevertError = (error: unknown): boolean => {
+  if (!(error instanceof Error)) return false;
+  const msg = error.message.toLowerCase();
+  if (msg.includes('revert') || msg.includes('execution reverted')) return true;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const anyErr = error as any;
+  if (anyErr.shortMessage?.toLowerCase().includes('revert')) return true;
+  if (typeof anyErr.name === 'string' && anyErr.name.includes('ContractFunction')) return true;
+  return false;
+};
 
 interface SecurityCheck {
   id: string;
@@ -40,15 +52,9 @@ interface ApiResponse {
   checks?: SecurityCheck[];
 }
 
-// Explorer API endpoints for different chains
-// Note: All chains now use the unified Etherscan V2 API as per chain configuration
-const EXPLORER_APIS = {
-  1: 'https://api.etherscan.io/v2/api',
-  8453: 'https://api.etherscan.io/v2/api', 
-  42161: 'https://api.etherscan.io/v2/api',
-  10: 'https://api.etherscan.io/v2/api',
-  137: 'https://api.etherscan.io/v2/api',
-  747474: null // Katana doesn't have explorer API
+// Helper to get explorer API URL for a chain
+const getExplorerApiUrl = (chainId: number): string | null => {
+  return SUPPORTED_CHAINS.find(c => c.id === chainId)?.explorerApiUrl ?? null;
 };
 
 // Cache for Safe version info (24-hour TTL)
@@ -126,6 +132,10 @@ export async function GET(
           const backupClient = createClient(true);
           return await operation(backupClient);
         } catch (backupError) {
+          // If either error is a contract revert, the RPC is fine — propagate the original error
+          if (isContractRevertError(primaryError) || isContractRevertError(backupError)) {
+            throw primaryError;
+          }
           console.error(`Both primary and backup RPC failed for ${chain.name}:`, primaryError, backupError);
           throw primaryError;
         }
@@ -146,6 +156,29 @@ export async function GET(
         error: 'Address is not a contract'
       };
       return NextResponse.json(errorResponse, { status: 400 });
+    }
+
+    // Verify the contract is actually a Safe multisig before proceeding
+    try {
+      await executeWithBackup((client) => {
+        return client.readContract({
+          address: address as `0x${string}`,
+          abi: GNOSIS_SAFE_ABI,
+          functionName: 'VERSION',
+        });
+      });
+    } catch (versionError) {
+      if (isContractRevertError(versionError) || (versionError instanceof Error && /revert|does not appear/i.test(versionError.message))) {
+        const errorResponse: ApiResponse = {
+          address,
+          chainId: parseInt(chainId),
+          chainName: chain.name,
+          analyzedAt: new Date().toISOString(),
+          success: false,
+          error: 'This address is a contract but does not appear to be a Gnosis Safe multisig. Only Safe multisig addresses are supported.'
+        };
+        return NextResponse.json(errorResponse, { status: 400 });
+      }
     }
 
     const readSafeCoreIndividually = async () => {
@@ -188,7 +221,7 @@ export async function GET(
             address: address as `0x${string}`,
             abi: GNOSIS_SAFE_ABI,
             functionName: 'getModulesPaginated',
-            args: ['0x0000000000000000000000000000000000000001', 10n],
+            args: [SENTINEL_MODULES_ADDRESS, 10n],
           });
         });
         modules = moduleArray as string[];
@@ -272,7 +305,7 @@ export async function GET(
               address: address as `0x${string}`,
               abi: GNOSIS_SAFE_ABI,
               functionName: 'getModulesPaginated',
-              args: ['0x0000000000000000000000000000000000000001', 10n],
+              args: [SENTINEL_MODULES_ADDRESS, 10n],
             },
             // Add guard and fallback handler calls
             {
@@ -312,6 +345,19 @@ export async function GET(
       guard = guardResult.status === 'success' ? guardResult.result as string : '0x0000000000000000000000000000000000000000';
       fallbackHandler = fallbackHandlerResult.status === 'success' ? fallbackHandlerResult.result as string : '0x0000000000000000000000000000000000000000';
     } catch (multicallError) {
+      // If the multicall error is a contract revert, this is not a Safe multisig
+      if (isContractRevertError(multicallError) || (multicallError instanceof Error && /revert|does not appear/i.test(multicallError.message))) {
+        const errorResponse: ApiResponse = {
+          address,
+          chainId: parseInt(chainId),
+          chainName: chain.name,
+          analyzedAt: new Date().toISOString(),
+          success: false,
+          error: 'This address is a contract but does not appear to be a Gnosis Safe multisig. Only Safe multisig addresses are supported.'
+        };
+        return NextResponse.json(errorResponse, { status: 400 });
+      }
+
       try {
         const safeCore = await readSafeCoreIndividually();
         version = safeCore.version;
@@ -322,15 +368,26 @@ export async function GET(
         guard = safeCore.guard;
         fallbackHandler = safeCore.fallbackHandler;
       } catch (fallbackError) {
+        if (isContractRevertError(fallbackError) || (fallbackError instanceof Error && /revert|does not appear/i.test(fallbackError.message))) {
+          const errorResponse: ApiResponse = {
+            address,
+            chainId: parseInt(chainId),
+            chainName: chain.name,
+            analyzedAt: new Date().toISOString(),
+            success: false,
+            error: 'This address is a contract but does not appear to be a Gnosis Safe multisig. Only Safe multisig addresses are supported.'
+          };
+          return NextResponse.json(errorResponse, { status: 400 });
+        }
         const errorResponse: ApiResponse = {
           address,
           chainId: parseInt(chainId),
           chainName: chain.name,
           analyzedAt: new Date().toISOString(),
           success: false,
-          error: `Address does not appear to be a valid Gnosis Safe contract${multicallError instanceof Error ? ` (${multicallError.message})` : ''}`
+          error: `Analysis failed: ${fallbackError instanceof Error ? fallbackError.message : 'Unknown error'}`
         };
-        return NextResponse.json(errorResponse, { status: 400 });
+        return NextResponse.json(errorResponse, { status: 500 });
       }
     }
 
@@ -379,6 +436,17 @@ export async function GET(
     return NextResponse.json(successResponse);
 
   } catch (error) {
+    if (isContractRevertError(error) || (error instanceof Error && /revert|does not appear/i.test(error.message))) {
+      const errorResponse: ApiResponse = {
+        address,
+        chainId: parseInt(chainId),
+        chainName: chain.name,
+        analyzedAt: new Date().toISOString(),
+        success: false,
+        error: 'This address is a contract but does not appear to be a Gnosis Safe multisig. Only Safe multisig addresses are supported.'
+      };
+      return NextResponse.json(errorResponse, { status: 400 });
+    }
     const errorResponse: ApiResponse = {
       address,
       chainId: parseInt(chainId),
@@ -776,8 +844,8 @@ async function checkSafeVersion(version: string): Promise<SecurityCheck> {
 // Check contract creation date via Explorer API
 async function checkContractCreationDate(address: string, chainId: number): Promise<SecurityCheck> {
   const apiKey = getApiKey();
-  const apiUrl = EXPLORER_APIS[chainId as keyof typeof EXPLORER_APIS];
-  
+const apiUrl = getExplorerApiUrl(chainId);
+   
   if (!apiUrl || !apiKey) {
     return {
       id: 'contract_creation_date',
@@ -789,7 +857,7 @@ async function checkContractCreationDate(address: string, chainId: number): Prom
   }
 
   try {
-    const url = `${apiUrl}?module=account&action=txlist&address=${address}&startblock=0&endblock=99999999&page=1&offset=1&sort=asc&apikey=${apiKey}`;
+    const url = `${apiUrl}?chainid=${chainId}&module=account&action=txlist&address=${address}&startblock=0&endblock=99999999&page=1&offset=1&sort=asc&apikey=${apiKey}`;
     const response = await fetch(url);
     const data = await response.json();
 
@@ -846,8 +914,8 @@ async function checkLastTransactionDate(address: string, chainId: number, nonce:
   }
 
   const apiKey = getApiKey();
-  const apiUrl = EXPLORER_APIS[chainId as keyof typeof EXPLORER_APIS];
-  
+const apiUrl = getExplorerApiUrl(chainId);
+   
   if (!apiUrl || !apiKey) {
     return {
       id: 'last_transaction_date',
@@ -859,7 +927,7 @@ async function checkLastTransactionDate(address: string, chainId: number, nonce:
   }
 
   try {
-    const url = `${apiUrl}?module=account&action=txlist&address=${address}&startblock=0&endblock=99999999&page=1&offset=1&sort=desc&apikey=${apiKey}`;
+    const url = `${apiUrl}?chainid=${chainId}&module=account&action=txlist&address=${address}&startblock=0&endblock=99999999&page=1&offset=1&sort=desc&apikey=${apiKey}`;
     const response = await fetch(url);
     const data = await response.json();
 

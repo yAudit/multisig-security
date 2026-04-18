@@ -7,7 +7,7 @@ import Safe from '@safe-global/protocol-kit';
 import { GNOSIS_SAFE_ABI, OFFICIAL_SAFE_FALLBACK_HANDLERS, OFFICIAL_SAFE_PROXY_FACTORIES, SAFE_VERSIONS_WITH_KNOWN_FACTORIES, SENTINEL_MODULES_ADDRESS } from '../constants/contracts';
 import { SUPPORTED_CHAINS, DEFAULT_CHAIN, CHAIN_ID_MAP, CHAIN_EXAMPLES, SAFE_TX_SERVICE_URLS, SAFE_GITHUB_RELEASES_URL, type ChainConfig } from '../constants/chains';
 import { getTooltipInfo } from '../constants/tooltips';
-import { Search, Share2, Info, CheckCircle, AlertTriangle, XCircle, Loader2, Zap, ChevronDown, ShieldAlert, Shield } from 'lucide-react';
+import { Search, Share2, Info, CheckCircle, AlertTriangle, XCircle, Loader2, ChevronDown, ShieldAlert, Shield } from 'lucide-react';
 import { cn, truncateHash } from '@/lib/utils';
 import { calculateSecurityScore, PENALTY_CONFIG, DEFAULT_PENALTY } from '@/lib/scoring';
 import { SpeedTest } from './SpeedTest';
@@ -17,6 +17,18 @@ interface RpcError extends Error {
   isRpcFailure: boolean;
   originalErrors: { primaryError: unknown; backupError: unknown };
 }
+
+// Helper to detect if an error is a contract revert (not an RPC issue)
+const isContractRevertError = (error: unknown): boolean => {
+  if (!(error instanceof Error)) return false;
+  const msg = error.message.toLowerCase();
+  if (msg.includes('revert') || msg.includes('execution reverted')) return true;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const anyErr = error as any;
+  if (anyErr.shortMessage?.toLowerCase().includes('revert')) return true;
+  if (typeof anyErr.name === 'string' && anyErr.name.includes('ContractFunction')) return true;
+  return false;
+};
 
 // Rate limiter for API calls
 
@@ -135,6 +147,11 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
         const backupClient = createClient(chain, true);
         return await operation(backupClient);
       } catch (backupError) {
+        // If both errors are contract reverts, the RPC is fine — the contract just doesn't support the call
+        const bothReverts = isContractRevertError(primaryError) || isContractRevertError(backupError);
+        if (bothReverts) {
+          throw primaryError;
+        }
         console.error(`Both primary and backup RPC failed for ${chain.name}:`, primaryError, backupError);
         // Create a specific error type to distinguish RPC failures from contract issues
         const rpcError = new Error(`RPC failure: Unable to connect to ${chain.name} network. Both primary and backup RPC endpoints are unavailable.`) as RpcError;
@@ -155,7 +172,11 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
         return await client.getBytecode({ address: addr as `0x${string}` });
       });
       return code !== undefined && code !== '0x';
-    } catch {
+    } catch (error) {
+      // Re-throw RPC failures — they should not be masked as "not a contract"
+      if (error && (error as RpcError).isRpcFailure) {
+        throw error;
+      }
       return false;
     }
   };
@@ -427,12 +448,18 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
       try {
         return await readSafeCoreIndividually(address, chain);
       } catch (fallbackError) {
+        if (isContractRevertError(fallbackError)) {
+          throw new Error('This address is a contract but does not appear to be a Gnosis Safe multisig. Only Safe multisig addresses are supported.');
+        }
         if (fallbackError instanceof Error) {
           throw fallbackError;
         }
       }
 
-      // If not an RPC failure, it might be a contract issue
+      // If not an RPC failure, it's likely a contract issue
+      if (isContractRevertError(error)) {
+        throw new Error('This address is a contract but does not appear to be a Gnosis Safe multisig. Only Safe multisig addresses are supported.');
+      }
       if (error instanceof Error) {
         throw error;
       }
@@ -1238,6 +1265,24 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
         setError('Address is not a contract');
         setLoading(false);
         return;
+      }
+
+      // Verify the contract is actually a Safe multisig by trying to call VERSION()
+      try {
+        await executeWithBackup(selectedChain, async (client) => {
+          return await client.readContract({
+            address: addressToAnalyze as `0x${string}`,
+            abi: GNOSIS_SAFE_ABI,
+            functionName: 'VERSION',
+          });
+        });
+      } catch (versionError) {
+        if (isContractRevertError(versionError) || (versionError instanceof Error && /revert|does not appear/i.test(versionError.message))) {
+          setError('This address is a contract but does not appear to be a Gnosis Safe multisig. Only Safe multisig addresses are supported.');
+          setLoading(false);
+          return;
+        }
+        // If it's not a revert, it might be a real RPC error — let it propagate to the full analysis attempt
       }
 
       // Use multicall to batch all Safe multisig function calls
@@ -2148,6 +2193,8 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
       // Check if this is an RPC failure
       if (err && (err as RpcError).isRpcFailure) {
         setError(err instanceof Error ? err.message : 'RPC failure: Unable to connect to network');
+      } else if (isContractRevertError(err) || (err instanceof Error && /revert|does not appear/i.test(err.message))) {
+        setError('This address is a contract but does not appear to be a Gnosis Safe multisig. Only Safe multisig addresses are supported.');
       } else {
         setError(`Error analyzing contract: ${err instanceof Error ? err.message : 'Unknown error'}`);
       }
