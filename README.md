@@ -1,6 +1,10 @@
 # Multisig Security Checker
 
-Security analyzer for Safe (formerly Gnosis Safe) multisig wallets. Paste a Safe address, choose a network, and get an opinionated security review that highlights risky configurations. Further information about the analysis is available in this post: https://blog.yaudit.dev/multisig-security.
+Security analyzer for Safe (formerly Gnosis Safe) multisig wallets. Paste a Safe address, choose a network, and get an opinionated security review that highlights risky configurations.
+
+**Live app:** [safe.yaudit.dev](https://safe.yaudit.dev)
+
+Further information about the analysis is available in this post: https://blog.yaudit.dev/multisig-security.
 
 ![Multisig security web app](screenshot.png)
 
@@ -10,7 +14,7 @@ Security analyzer for Safe (formerly Gnosis Safe) multisig wallets. Paste a Safe
 - **Security heuristics** – sixteen checks score each Safe on threshold quality, signing speed, proxy factory provenance, owner activity, EOA vs contract signers, optional modules, fallback handler provenance, emergency recovery settings, and more.
 - **Signing speed analysis** – measures average time between first and last confirmation across recent transactions to flag potential signer centralization.
 - **Factory verification** – checks whether the Safe was deployed by an official Safe proxy factory, with version-aware scoring for versions where no factory addresses are catalogued.
-- **Cross-chain awareness** – detects deployments across Ethereum, Base, Arbitrum, Optimism, Polygon, and Katana, then warns when signers are reused between chains (replay-attack risk).
+- **Cross-chain awareness** – detects deployments across Ethereum, Base, Arbitrum, Optimism, Polygon, BNB Chain, Sonic, and Katana, then warns when signers are reused between chains (replay-attack risk).
 - **Fresh data sources** – combines viem RPC calls, Safe Protocol Kit helpers, Safe Transaction Service APIs, GitHub release metadata, and Etherscan-style explorer APIs with rate limiting and RPC fallbacks.
 - **Human-friendly UX** – color-coded score bar, hover tooltips that explain every check, and curated example Safes for each chain so you can demo the tool instantly.
 
@@ -60,10 +64,16 @@ All functionality is exposed through the built-in API route:
 GET /api/[chainId]/[address]
 ```
 
-- `chainId`: numeric ID from `SUPPORTED_CHAINS` (1, 56, 8453, 42161, 10, 137, 747474).
+- `chainId`: numeric ID from `SUPPORTED_CHAINS` (1, 10, 56, 137, 146, 8453, 42161, 747474).
 - `address`: Safe contract address (checksum format preferred).
 
-Example request:
+Example request (hosted):
+
+```bash
+curl https://safe.yaudit.dev/api/1/0x73b047fe6337183A454c5217241D780a932777bD/
+```
+
+Or against a local dev server:
 
 ```bash
 curl http://localhost:3000/api/1/0x73b047fe6337183A454c5217241D780a932777bD/

@@ -12,11 +12,34 @@ const geistMono = Geist_Mono({
   subsets: ["latin"],
 });
 
+const title = "Multisig Security Checker";
+const description = "Check multisig security best practices to identify improvements or risks in a multisig's configuration";
+
 export const metadata: Metadata = {
-  title: "Multisig Security Checker",
-  description: "Check multisig security best practices to identify improvements or risks in a multisig's configuration",
+  metadataBase: new URL("https://safe.yaudit.dev"),
+  title,
+  description,
   icons: {
     icon: '/icon.svg',
+  },
+  openGraph: {
+    title,
+    description,
+    type: "website",
+    images: [
+      {
+        url: "/og-image.png",
+        width: 1200,
+        height: 633,
+        alt: "Multisig Security Checker",
+      },
+    ],
+  },
+  twitter: {
+    card: "summary_large_image",
+    title,
+    description,
+    images: ["/og-image.png"],
   },
 };
 
