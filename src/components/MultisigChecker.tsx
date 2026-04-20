@@ -2696,17 +2696,6 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
                         result.status === 'loading' && "text-[var(--color-primary)]"
                       )}>{result.title}</h3>
                       
-                      {/* Criticality Badge - only show for critical tests */}
-                      {penaltyConfig.isCritical && (
-                        <span 
-                          className="inline-flex items-center gap-1 rounded-full bg-[var(--color-error)]/10 px-2 py-0.5 text-xs font-medium text-[var(--color-error)]"
-                          title="Critical security check - failures have major impact on score"
-                        >
-                          <ShieldAlert className="h-3 w-3" />
-                          Critical
-                        </span>
-                      )}
-                      
                       <button
                         onClick={() => setOpenTooltip(isTooltipOpen ? null : index)}
                         className={cn(
