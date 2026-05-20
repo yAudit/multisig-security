@@ -115,7 +115,7 @@ function categorizeVersion(
   }
 
   const [major, minor, patch] = version.split('.').map(Number);
-  const [latestMajor, latestMinor] = latestVersion.split('.').map(Number);
+  const [latestMajor, latestMinor, latestPatch] = latestVersion.split('.').map(Number);
 
   if (major < latestMajor) return 'very-old';
   if (major > latestMajor) return 'future';
@@ -123,9 +123,9 @@ function categorizeVersion(
     return (latestMinor - minor <= 2) ? 'old' : 'very-old';
   }
   if (minor > latestMinor) return 'future';
-
-  const [, , latestPatch] = latestVersion.split('.').map(Number);
-  return patch < latestPatch ? 'old' : 'latest';
+  if (patch < latestPatch) return 'old';
+  if (patch > latestPatch) return 'future';
+  return 'latest';
 }
 
 export async function GET(
@@ -622,8 +622,7 @@ async function checkMultiChainDeployment(address: string, currentChainId: number
   }
 
   if (deployedChains === 1) return { check: { id: 'chain_configuration', title: 'Chain Configuration', status: 'success', message: `Safe is deployed only on ${chainNames[0]}. No multi-chain deployment detected.`, details: { deployedChains, chainNames } }, deployedChainIds };
-  if (deployedChains > 1) return { check: { id: 'chain_configuration', title: 'Chain Configuration', status: 'warning', message: `Multi-chain deployment detected. Safe exists on ${deployedChains} chains: ${chainNames.join(', ')}`, details: { deployedChains, chainNames } }, deployedChainIds };
-  return { check: { id: 'chain_configuration', title: 'Chain Configuration', status: 'error', message: 'Could not verify Safe deployment on any chain', details: { deployedChains, chainNames } }, deployedChainIds };
+  return { check: { id: 'chain_configuration', title: 'Chain Configuration', status: 'warning', message: `Multi-chain deployment detected. Safe exists on ${deployedChains} chains: ${chainNames.join(', ')}`, details: { deployedChains, chainNames } }, deployedChainIds };
 }
 
 // 13. Owner Activity Analysis (full implementation matching frontend)

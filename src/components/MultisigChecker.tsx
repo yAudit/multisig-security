@@ -287,12 +287,8 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
     // If we couldn't fetch the latest version, fall back to hardcoded logic
     if (!latestVersion) {
       if (version === '1.4.1') return 'latest';
-      const [major, minor, patch] = version.split('.').map(Number);
-      if (major === 1 && minor >= 3 && minor <= 4) {
-        if (minor === 4 && patch === 0) return 'old';
-        if (minor === 3) return 'old';
-        return 'old';
-      }
+      const [major, minor] = version.split('.').map(Number);
+      if (major === 1 && minor >= 3 && minor <= 4) return 'old';
       return 'very-old';
     }
 
@@ -386,7 +382,8 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
       });
       guard = guardAddress as string;
     } catch {
-      guard = { error: 'UNSUPPORTED_VERSION' };
+      const [, minor] = (version as string).split('.').map(Number);
+      guard = minor < 3 ? { error: 'UNSUPPORTED_VERSION' } : null;
     }
 
     let fallbackHandler: string | null = null;
@@ -491,12 +488,13 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
         modules = moduleArray;
       }
 
-      // Handle guard result - getGuard might not exist on older Safe versions
+      // Handle guard result - getGuard doesn't exist on Safe versions before 1.3.0
       let guard: string | { error: string } | null = null;
       if (guardResult.status === 'success') {
         guard = guardResult.result as string;
       } else {
-        guard = { error: 'UNSUPPORTED_VERSION' };
+        const [, minor] = version.split('.').map(Number);
+        guard = minor < 3 ? { error: 'UNSUPPORTED_VERSION' } : null;
       }
 
       // Handle fallback handler result
@@ -959,9 +957,6 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
             } catch (error) {
               const errorMessage = error instanceof Error ? error.message : String(error);
               console.error(`Error getting owners for ${address} on ${chain.name} (attempt ${retryCount + 1}):`, errorMessage);
-              if (errorMessage.includes('Invalid multiSend contract address')) {
-                console.warn(`MultiSend contract error on ${chain.name} - possible Safe version compatibility issue`);
-              }
               if (retryCount >= maxRetries - 1) {
                 console.error(`Failed to get owners after ${maxRetries} attempts on ${chain.name}`);
                 return { chainName: chain.name, owners: [] as string[] };
@@ -1647,19 +1642,11 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
               message: 'Could not check transaction guard status'
             };
           } else if (typeof guardResult === 'object' && 'error' in guardResult) {
-            if (guardResult.error === 'UNSUPPORTED_VERSION') {
-              newResults[9] = {
-                title: 'Transaction Guard',
-                status: 'warning',
-                message: 'Could not check transaction guard status (Safe version too old for Safe SDK support)'
-              };
-            } else {
-              newResults[9] = {
-                title: 'Transaction Guard',
-                status: 'warning',
-                message: 'Could not check transaction guard status (requires Safe SDK support)'
-              };
-            }
+            newResults[9] = {
+              title: 'Transaction Guard',
+              status: 'warning',
+              message: 'Could not check transaction guard status (Safe version too old for guard support)'
+            };
           } else if (guardResult === '0x0000000000000000000000000000000000000000' || guardResult === '') {
             // No guard enabled (good)
             newResults[9] = {
