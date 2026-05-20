@@ -41,7 +41,7 @@ export const SUPPORTED_CHAINS: ChainConfig[] = [
     id: 1,
     name: 'Ethereum',
     viemChain: mainnet,
-    rpcUrl: 'https://eth.meowrpc.com',
+    rpcUrl: process.env.RPC_URL_ETHEREUM || 'https://eth.meowrpc.com',
     backupRpcUrl: 'https://eth.drpc.org',
     explorerApiUrl: 'https://api.etherscan.io/v2/api',
     explorerUrl: 'https://etherscan.io',
@@ -51,9 +51,9 @@ export const SUPPORTED_CHAINS: ChainConfig[] = [
     id: 8453,
     name: 'Base',
     viemChain: base,
-    rpcUrl: 'https://base.meowrpc.com',
+    rpcUrl: process.env.RPC_URL_BASE || 'https://base.meowrpc.com',
     backupRpcUrl: 'https://base.drpc.org',
-    explorerApiUrl: 'https://api.etherscan.io/v2/api',
+    explorerApiUrl: 'https://base.blockscout.com/api',
     explorerUrl: 'https://basescan.org',
     safeTransactionServiceUrl: 'https://safe-transaction-base.safe.global'
   },
@@ -61,7 +61,7 @@ export const SUPPORTED_CHAINS: ChainConfig[] = [
     id: 42161,
     name: 'Arbitrum',
     viemChain: arbitrum,
-    rpcUrl: 'https://arbitrum.drpc.org',
+    rpcUrl: process.env.RPC_URL_ARBITRUM || 'https://arbitrum.drpc.org',
     backupRpcUrl: 'https://arb1.arbitrum.io/rpc',
     explorerApiUrl: 'https://api.etherscan.io/v2/api',
     explorerUrl: 'https://arbiscan.io',
@@ -71,9 +71,9 @@ export const SUPPORTED_CHAINS: ChainConfig[] = [
     id: 10,
     name: 'Optimism',
     viemChain: optimism,
-    rpcUrl: 'https://optimism.drpc.org',
+    rpcUrl: process.env.RPC_URL_OPTIMISM || 'https://optimism.drpc.org',
     backupRpcUrl: 'https://mainnet.optimism.io',
-    explorerApiUrl: 'https://api.etherscan.io/v2/api',
+    explorerApiUrl: 'https://explorer.optimism.io/api',
     explorerUrl: 'https://optimistic.etherscan.io',
     safeTransactionServiceUrl: 'https://safe-transaction-optimism.safe.global'
   },
@@ -81,7 +81,7 @@ export const SUPPORTED_CHAINS: ChainConfig[] = [
     id: 137,
     name: 'Polygon',
     viemChain: polygon,
-    rpcUrl: 'https://polygon.drpc.org',
+    rpcUrl: process.env.RPC_URL_POLYGON || 'https://polygon.drpc.org',
     backupRpcUrl: 'https://polygon-rpc.com',
     explorerApiUrl: 'https://api.etherscan.io/v2/api',
     explorerUrl: 'https://polygonscan.com',
@@ -91,7 +91,7 @@ export const SUPPORTED_CHAINS: ChainConfig[] = [
     id: 56,
     name: 'BNB',
     viemChain: bsc,
-    rpcUrl: 'https://1rpc.io/bnb',
+    rpcUrl: process.env.RPC_URL_BNB || 'https://1rpc.io/bnb',
     backupRpcUrl: 'https://bsc-dataseed.binance.org',
     explorerApiUrl: 'https://api.etherscan.io/v2/api',
     explorerUrl: 'https://bscscan.com',
@@ -101,7 +101,7 @@ export const SUPPORTED_CHAINS: ChainConfig[] = [
     id: 146,
     name: 'Sonic',
     viemChain: sonic,
-    rpcUrl: 'https://sonic.drpc.org',
+    rpcUrl: process.env.RPC_URL_SONIC || 'https://sonic.drpc.org',
     backupRpcUrl: 'https://rpc.soniclabs.com',
     explorerApiUrl: 'https://api.etherscan.io/v2/api',
     explorerUrl: 'https://sonicscan.org'
@@ -110,7 +110,7 @@ export const SUPPORTED_CHAINS: ChainConfig[] = [
     id: 747474,
     name: 'Katana',
     viemChain: katanaWithMulticall,
-    rpcUrl: 'https://rpc.katana.network',
+    rpcUrl: process.env.RPC_URL_KATANA || 'https://rpc.katana.network',
     backupRpcUrl: 'https://katana.drpc.org',
     explorerApiUrl: 'https://api.etherscan.io/v2/api',
     explorerUrl: 'https://katanascan.com/',
@@ -119,6 +119,24 @@ export const SUPPORTED_CHAINS: ChainConfig[] = [
 ];
 
 export const DEFAULT_CHAIN = SUPPORTED_CHAINS[0]; // Ethereum
+
+export function isBlockscout(explorerApiUrl: string): boolean {
+  return explorerApiUrl.includes('blockscout.com') || explorerApiUrl.includes('explorer.optimism.io');
+}
+
+export function buildExplorerApiUrl(
+  explorerApiUrl: string,
+  chainId: number,
+  params: Record<string, string>
+): string {
+  const qs = Object.entries(params)
+    .map(([k, v]) => `${k}=${v}`)
+    .join('&');
+  if (isBlockscout(explorerApiUrl)) {
+    return `${explorerApiUrl}?${qs}`;
+  }
+  return `${explorerApiUrl}?chainid=${chainId}&${qs}`;
+}
 
 // Lookup map: chain ID → Safe Transaction Service URL (undefined if not available)
 export const SAFE_TX_SERVICE_URLS: Record<number, string> = Object.fromEntries(

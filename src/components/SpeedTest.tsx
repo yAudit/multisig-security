@@ -56,7 +56,7 @@ interface Transaction {
   proposal_to_last_sig_formatted: string;
 }
 
-interface AnalysisResult {
+export interface AnalysisResult {
   safe_address: string;
   chain: string;
   total_transactions_analyzed: number;
@@ -70,6 +70,7 @@ interface SpeedTestProps {
   chainId: number;
   chainName: string;
   explorerUrl: string;
+  initialData?: AnalysisResult | null;
 }
 
 function formatDuration(seconds: number): string {
@@ -163,7 +164,7 @@ function getMinGapClass(gapSeconds: number): string {
   return "text-[var(--color-success)]";
 }
 
-async function fetchAndAnalyzeSafe(address: string, chainId: number): Promise<AnalysisResult> {
+export async function fetchAndAnalyzeSafe(address: string, chainId: number): Promise<AnalysisResult> {
   const apiUrl = SAFE_TX_SERVICE_URLS[chainId];
   if (!apiUrl) {
     throw new Error(`Chain ${chainId} not supported for speed test`);
@@ -268,10 +269,10 @@ async function fetchAndAnalyzeSafe(address: string, chainId: number): Promise<An
   };
 }
 
-export function SpeedTest({ address, chainId, chainName, explorerUrl }: SpeedTestProps) {
-  const [loading, setLoading] = useState(false);
+export function SpeedTest({ address, chainId, chainName, explorerUrl, initialData }: SpeedTestProps) {
+  const [loading, setLoading] = useState(!initialData);
   const [error, setError] = useState<string | null>(null);
-  const [result, setResult] = useState<AnalysisResult | null>(null);
+  const [result, setResult] = useState<AnalysisResult | null>(initialData ?? null);
   const [expanded, setExpanded] = useState(false);
 
   const runTest = useCallback(async () => {
@@ -290,10 +291,12 @@ export function SpeedTest({ address, chainId, chainName, explorerUrl }: SpeedTes
     }
   }, [address, chainId, result, loading]);
 
-  // Auto-run on mount
+  // Auto-run on mount only if no initial data was provided
   React.useEffect(() => {
-    runTest();
-  }, [runTest]);
+    if (!initialData) {
+      runTest();
+    }
+  }, [runTest, initialData]);
 
   if (loading) {
     return (

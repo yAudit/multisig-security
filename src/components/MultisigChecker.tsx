@@ -5,12 +5,13 @@ import { createPublicClient, http, isAddress, getAddress } from 'viem';
 import { multicall } from 'viem/actions';
 import Safe from '@safe-global/protocol-kit';
 import { GNOSIS_SAFE_ABI, OFFICIAL_SAFE_FALLBACK_HANDLERS, OFFICIAL_SAFE_PROXY_FACTORIES, SAFE_VERSIONS_WITH_KNOWN_FACTORIES, SENTINEL_MODULES_ADDRESS } from '../constants/contracts';
-import { SUPPORTED_CHAINS, DEFAULT_CHAIN, CHAIN_ID_MAP, CHAIN_EXAMPLES, SAFE_TX_SERVICE_URLS, SAFE_GITHUB_RELEASES_URL, type ChainConfig } from '../constants/chains';
+import { SUPPORTED_CHAINS, DEFAULT_CHAIN, CHAIN_ID_MAP, CHAIN_EXAMPLES, SAFE_TX_SERVICE_URLS, SAFE_GITHUB_RELEASES_URL, type ChainConfig, isBlockscout, buildExplorerApiUrl } from '../constants/chains';
 import { getTooltipInfo } from '../constants/tooltips';
 import { Search, Share2, Info, CheckCircle, AlertTriangle, XCircle, Loader2, ChevronDown, ShieldAlert, Shield } from 'lucide-react';
 import { cn, truncateHash } from '@/lib/utils';
 import { calculateSecurityScore, PENALTY_CONFIG, DEFAULT_PENALTY } from '@/lib/scoring';
-import { SpeedTest } from './SpeedTest';
+import { SpeedTest, fetchAndAnalyzeSafe } from './SpeedTest';
+import type { AnalysisResult } from './SpeedTest';
 
 // Extended Error type for RPC failures
 interface RpcError extends Error {
@@ -117,6 +118,29 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
   const [isToastFading, setIsToastFading] = useState(false);
   const [chainChanged, setChainChanged] = useState(false);
   const [selectedExample, setSelectedExample] = useState('');
+
+  // Ref to track API-authoritative statuses so frontend async callbacks don't overwrite them
+  const apiStatusRef = React.useRef<Record<string, 'success' | 'warning' | 'error'>>({});
+
+  // Whenever results change, reconcile any frontend status with the API-authoritative status.
+  // This guarantees the frontend's displayed statuses (and therefore score) always match the API.
+  React.useEffect(() => {
+    const apiStatuses = apiStatusRef.current;
+    if (Object.keys(apiStatuses).length === 0) return; // No API data yet
+
+    setResults(prevResults => {
+      let needsUpdate = false;
+      const newResults = prevResults.map(r => {
+        const apiStatus = apiStatuses[r.title];
+        if (apiStatus && r.status !== 'loading' && r.status !== apiStatus) {
+          needsUpdate = true;
+          return { ...r, status: apiStatus };
+        }
+        return r;
+      });
+      return needsUpdate ? newResults : prevResults;
+    });
+  }, [results]);
 
   // Memoize security score calculation
   const securityScore = useMemo(() => {
@@ -351,6 +375,34 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
       // Optional modules are not available on older Safe versions. Leave empty.
     }
 
+    let guard: string | { error: string } | null = null;
+    try {
+      const guardAddress = await executeWithBackup(chain, async (client) => {
+        return await client.readContract({
+          address: address as `0x${string}`,
+          abi: GNOSIS_SAFE_ABI,
+          functionName: 'getGuard',
+        });
+      });
+      guard = guardAddress as string;
+    } catch {
+      guard = { error: 'UNSUPPORTED_VERSION' };
+    }
+
+    let fallbackHandler: string | null = null;
+    try {
+      const handlerAddress = await executeWithBackup(chain, async (client) => {
+        return await client.readContract({
+          address: address as `0x${string}`,
+          abi: GNOSIS_SAFE_ABI,
+          functionName: 'getFallbackHandler',
+        });
+      });
+      fallbackHandler = handlerAddress as string;
+    } catch {
+      fallbackHandler = null;
+    }
+
     // Validate version format
     if (!checkVersionFormat(version)) {
       throw new Error('Contract does not appear to be a Safe multisig (invalid VERSION format)');
@@ -362,6 +414,8 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
       owners: owners as readonly string[],
       nonce: nonce as bigint,
       modules,
+      guard,
+      fallbackHandler,
     };
   };
 
@@ -395,6 +449,16 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
             functionName: 'getModulesPaginated',
             args: [SENTINEL_MODULES_ADDRESS, 10],
           },
+          {
+            address: address as `0x${string}`,
+            abi: GNOSIS_SAFE_ABI,
+            functionName: 'getGuard',
+          },
+          {
+            address: address as `0x${string}`,
+            abi: GNOSIS_SAFE_ABI,
+            functionName: 'getFallbackHandler',
+          },
         ];
 
         return await multicall(client, {
@@ -404,7 +468,7 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
       });
 
       // Process results and handle potential errors
-      const [versionResult, thresholdResult, ownersResult, nonceResult, modulesResult] = results;
+      const [versionResult, thresholdResult, ownersResult, nonceResult, modulesResult, guardResult, fallbackHandlerResult] = results;
 
       if (
         versionResult.status === 'failure' ||
@@ -427,6 +491,20 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
         modules = moduleArray;
       }
 
+      // Handle guard result - getGuard might not exist on older Safe versions
+      let guard: string | { error: string } | null = null;
+      if (guardResult.status === 'success') {
+        guard = guardResult.result as string;
+      } else {
+        guard = { error: 'UNSUPPORTED_VERSION' };
+      }
+
+      // Handle fallback handler result
+      let fallbackHandler: string | null = null;
+      if (fallbackHandlerResult.status === 'success') {
+        fallbackHandler = fallbackHandlerResult.result as string;
+      }
+
       // Validate version format
       if (!checkVersionFormat(version)) {
         throw new Error('Contract does not appear to be a Safe multisig (invalid VERSION format)');
@@ -438,6 +516,8 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
         owners,
         nonce,
         modules,
+        guard,
+        fallbackHandler,
       };
     } catch (error) {
       // Check if this is an RPC failure rather than a contract issue
@@ -470,17 +550,19 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
   const getContractCreationDate = async (addr: string, chain: ChainConfig): Promise<Date | null> => {
     try {
       // Use explorer API to get contract creation information
-      // This requires an Etherscan API key to be set
       const ETHERSCAN_API_KEY = process.env.NEXT_PUBLIC_ETHERSCAN_API_KEY || 'YourApiKeyToken';
 
-      if (!ETHERSCAN_API_KEY || ETHERSCAN_API_KEY === 'YourApiKeyToken') {
+      if (!isBlockscout(chain.explorerApiUrl) && (!ETHERSCAN_API_KEY || ETHERSCAN_API_KEY === 'YourApiKeyToken')) {
         return null;
       }
 
 
       // Get first 20 transactions in one call to find contract creation efficiently
-      // All chains now use Etherscan V2 unified API with chainid parameter
-      const apiUrl = `${chain.explorerApiUrl}?chainid=${chain.id}&module=account&action=txlist&address=${addr}&startblock=0&endblock=99999999&page=1&offset=20&sort=asc&apikey=${ETHERSCAN_API_KEY}`;
+      const apikeyParam = isBlockscout(chain.explorerApiUrl) ? '' : `&apikey=${ETHERSCAN_API_KEY}`;
+      const apiUrl = buildExplorerApiUrl(chain.explorerApiUrl, chain.id, {
+        module: 'account', action: 'txlist', address: addr,
+        startblock: '0', endblock: '99999999', page: '1', offset: '20', sort: 'asc',
+      }) + apikeyParam;
 
       const response = await etherscanRateLimiter.makeRequest(() =>
         fetch(apiUrl, {
@@ -523,14 +605,17 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
       // Use explorer API to get the most recent transaction
       const ETHERSCAN_API_KEY = process.env.NEXT_PUBLIC_ETHERSCAN_API_KEY || 'YourApiKeyToken';
 
-      if (!ETHERSCAN_API_KEY || ETHERSCAN_API_KEY === 'YourApiKeyToken') {
+      if (!isBlockscout(chain.explorerApiUrl) && (!ETHERSCAN_API_KEY || ETHERSCAN_API_KEY === 'YourApiKeyToken')) {
         return null;
       }
 
 
       // Get the most recent transaction by sorting in descending order and taking the first result
-      // All chains now use Etherscan V2 unified API with chainid parameter
-      const apiUrl = `${chain.explorerApiUrl}?chainid=${chain.id}&module=account&action=txlist&address=${addr}&startblock=0&endblock=99999999&page=1&offset=1&sort=desc&apikey=${ETHERSCAN_API_KEY}`;
+      const apikeyParam = isBlockscout(chain.explorerApiUrl) ? '' : `&apikey=${ETHERSCAN_API_KEY}`;
+      const apiUrl = buildExplorerApiUrl(chain.explorerApiUrl, chain.id, {
+        module: 'account', action: 'txlist', address: addr,
+        startblock: '0', endblock: '99999999', page: '1', offset: '1', sort: 'desc',
+      }) + apikeyParam;
 
       try {
         const response = await etherscanRateLimiter.makeRequest(() =>
@@ -571,7 +656,7 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
   }> => {
     const ETHERSCAN_API_KEY = process.env.NEXT_PUBLIC_ETHERSCAN_API_KEY || 'YourApiKeyToken';
 
-    if (!ETHERSCAN_API_KEY || ETHERSCAN_API_KEY === 'YourApiKeyToken') {
+    if (!isBlockscout(chain.explorerApiUrl) && (!ETHERSCAN_API_KEY || ETHERSCAN_API_KEY === 'YourApiKeyToken')) {
       // Explorer API key not configured for owner transaction lookup
       return {
         activeOwners: [],
@@ -582,16 +667,14 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
 
 
     const results = await Promise.allSettled(
-      ownerAddresses.map(async (ownerAddr, index) => {
+      ownerAddresses.map(async (ownerAddr) => {
         try {
-          // Add staggered delay to prevent rate limiting
-          if (index > 0) {
-            await new Promise(resolve => setTimeout(resolve, 1000 * index));
-          }
-
           // Get recent transactions to check for non-multisig activity
-          // All chains now use Etherscan V2 unified API with chainid parameter
-          const apiUrl = `${chain.explorerApiUrl}?chainid=${chain.id}&module=account&action=txlist&address=${ownerAddr}&startblock=0&endblock=99999999&page=1&offset=10&sort=desc&apikey=${ETHERSCAN_API_KEY}`;
+          const apikeyParam = isBlockscout(chain.explorerApiUrl) ? '' : `&apikey=${ETHERSCAN_API_KEY}`;
+          const apiUrl = buildExplorerApiUrl(chain.explorerApiUrl, chain.id, {
+            module: 'account', action: 'txlist', address: ownerAddr,
+            startblock: '0', endblock: '99999999', page: '1', offset: '10', sort: 'desc',
+          }) + apikeyParam;
 
           // Add timeout to prevent hanging requests
           const controller = new AbortController();
@@ -681,7 +764,7 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
     try {
       const ETHERSCAN_API_KEY = process.env.NEXT_PUBLIC_ETHERSCAN_API_KEY || 'YourApiKeyToken';
 
-      if (!ETHERSCAN_API_KEY || ETHERSCAN_API_KEY === 'YourApiKeyToken') {
+      if (!isBlockscout(chain.explorerApiUrl) && (!ETHERSCAN_API_KEY || ETHERSCAN_API_KEY === 'YourApiKeyToken')) {
         // No API key configured, returning address
         return address;
       }
@@ -693,8 +776,11 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
         await new Promise(resolve => setTimeout(resolve, delay));
       }
 
-      // Try to make the request directly to Etherscan API
-      const apiUrl = `${chain.explorerApiUrl}?chainid=${chain.id}&module=contract&action=getsourcecode&address=${address}&apikey=${ETHERSCAN_API_KEY}`;
+      // Try to make the request directly to explorer API
+      const apikeyParam = isBlockscout(chain.explorerApiUrl) ? '' : `&apikey=${ETHERSCAN_API_KEY}`;
+      const apiUrl = buildExplorerApiUrl(chain.explorerApiUrl, chain.id, {
+        module: 'contract', action: 'getsourcecode', address: address,
+      }) + apikeyParam;
 
       // Add timeout to prevent hanging requests
       const controller = new AbortController();
@@ -810,216 +896,102 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
     }
   };
 
-  const checkSafeGuard = async (address: string, chain: ChainConfig): Promise<string | { error: string }> => {
-    try {
-      // Try Safe Protocol Kit first
-      const safe = await Safe.init({
-        provider: chain.rpcUrl,
-        safeAddress: address,
-      });
-
-      const guardAddress = await safe.getGuard();
-      return guardAddress;
-    } catch (error) {
-      console.error('Error checking Safe guard with SDK:', error);
-
-      // Check if the error is specifically about unsupported Safe version
-      if (error instanceof Error && error.message.includes('does not support Safe transaction guards')) {
-        return { error: 'UNSUPPORTED_VERSION' };
-      }
-
-      // If SDK fails (e.g., multiSend contract address error), try direct viem fallback
-      if (error instanceof Error && error.message.includes('Invalid multiSend contract address')) {
-        // Falling back to direct viem call for getGuard
-        try {
-          const client = createClient(chain);
-          const guardAddress = await client.readContract({
-            address: address as `0x${string}`,
-            abi: GNOSIS_SAFE_ABI,
-            functionName: 'getGuard',
-          });
-          return guardAddress as string;
-        } catch (viemError) {
-          console.error('Direct viem fallback failed for getGuard:', viemError);
-          if (viemError instanceof Error && viemError.message.includes('function does not exist')) {
-            return { error: 'UNSUPPORTED_VERSION' };
-          }
-          return { error: 'GENERAL_ERROR' };
-        }
-      }
-
-      // Other types of errors (network, invalid address, etc.)
-      return { error: 'GENERAL_ERROR' };
-    }
-  };
-
 
   const checkMultiChainSignerReuse = async (address: string, deployedChains: ChainConfig[]): Promise<{ reusedSigners: string[], allChainOwners: { [chainName: string]: string[] }, signerChains: { [signer: string]: string[] } }> => {
     try {
-      // Checking signer reuse across multiple chains
-
       const allChainOwners: { [chainName: string]: string[] } = {};
       const signerCounts: { [signer: string]: string[] } = {};
 
-      // Get owners from each chain with rate limiting and retry logic
-      for (const chain of deployedChains) {
-        let retryCount = 0;
-        const maxRetries = 3;
-        let success = false;
+      const chainResults = await Promise.allSettled(
+        deployedChains.map(async (chain) => {
+          const maxRetries = 3;
+          let owners: string[] | null = null;
 
-        while (retryCount < maxRetries && !success) {
-          try {
-            // Getting owners with retry
-
-            // Rate limiting: wait 400ms before each request
-            if (retryCount > 0) {
-              // Retrying after delay
-            }
-            await new Promise(resolve => setTimeout(resolve, 400));
-
-            // First check if the contract exists on this chain
-            const client = createPublicClient({
-              chain: {
-                id: CHAIN_ID_MAP[chain.name as keyof typeof CHAIN_ID_MAP] || 1,
-                name: chain.name,
-                rpcUrls: { default: { http: [chain.rpcUrl] } },
-                nativeCurrency: { name: 'ETH', symbol: 'ETH', decimals: 18 }
-              },
-              transport: http(chain.rpcUrl)
-            });
-
-            const contractCode = await client.getCode({ address: address as `0x${string}` });
-            if (!contractCode || contractCode === '0x') {
-              // Contract does not exist on this chain
-              allChainOwners[chain.name] = [];
-              success = true;
-              continue;
-            }
-
-            let owners: string[];
-
+          for (let retryCount = 0; retryCount < maxRetries && owners === null; retryCount++) {
             try {
-              // Try Safe Protocol Kit first
-              const safe = await Safe.init({
-                provider: chain.rpcUrl,
-                safeAddress: address,
+              const client = createPublicClient({
+                chain: {
+                  id: CHAIN_ID_MAP[chain.name as keyof typeof CHAIN_ID_MAP] || 1,
+                  name: chain.name,
+                  rpcUrls: { default: { http: [chain.rpcUrl] } },
+                  nativeCurrency: { name: 'ETH', symbol: 'ETH', decimals: 18 }
+                },
+                transport: http(chain.rpcUrl)
               });
-              owners = await safe.getOwners();
-            } catch (initError) {
-              const initErrorMessage = initError instanceof Error ? initError.message : String(initError);
-              if (initErrorMessage.includes('Invalid multiSend contract address')) {
-                // Safe SDK failed, falling back to direct viem calls
-                // Fallback to direct viem call
-                const client = createPublicClient({
-                  chain: {
-                    id: CHAIN_ID_MAP[chain.name as keyof typeof CHAIN_ID_MAP] || 1,
-                    name: chain.name,
-                    rpcUrls: { default: { http: [chain.rpcUrl] } },
-                    nativeCurrency: { name: 'ETH', symbol: 'ETH', decimals: 18 }
-                  },
-                  transport: http(chain.rpcUrl)
+
+              const contractCode = await client.getCode({ address: address as `0x${string}` });
+              if (!contractCode || contractCode === '0x') {
+                return { chainName: chain.name, owners: [] as string[] };
+              }
+
+              let fetchedOwners: string[];
+
+              try {
+                const safe = await Safe.init({
+                  provider: chain.rpcUrl,
+                  safeAddress: address,
                 });
+                fetchedOwners = await safe.getOwners();
+              } catch (initError) {
+                const initErrorMessage = initError instanceof Error ? initError.message : String(initError);
+                if (initErrorMessage.includes('Invalid multiSend contract address')) {
+                  const fallbackClient = createPublicClient({
+                    chain: {
+                      id: CHAIN_ID_MAP[chain.name as keyof typeof CHAIN_ID_MAP] || 1,
+                      name: chain.name,
+                      rpcUrls: { default: { http: [chain.rpcUrl] } },
+                      nativeCurrency: { name: 'ETH', symbol: 'ETH', decimals: 18 }
+                    },
+                    transport: http(chain.rpcUrl)
+                  });
 
-                owners = await client.readContract({
-                  address: address as `0x${string}`,
-                  abi: GNOSIS_SAFE_ABI,
-                  functionName: 'getOwners',
-                }) as string[];
-              } else {
-                throw initError;
+                  fetchedOwners = await fallbackClient.readContract({
+                    address: address as `0x${string}`,
+                    abi: GNOSIS_SAFE_ABI,
+                    functionName: 'getOwners',
+                  }) as string[];
+                } else {
+                  throw initError;
+                }
               }
-            }
-            allChainOwners[chain.name] = owners;
 
-            // Track which chains each signer appears on
-            owners.forEach(owner => {
-              const ownerLower = owner.toLowerCase();
-              if (!signerCounts[ownerLower]) {
-                signerCounts[ownerLower] = [];
-              }
-              signerCounts[ownerLower].push(chain.name);
-            });
-
-            // Found owners on chain
-            success = true;
-          } catch (error) {
-            retryCount++;
-            const errorMessage = error instanceof Error ? error.message : String(error);
-            console.error(`Error getting owners for ${address} on ${chain.name} (attempt ${retryCount}):`, errorMessage);
-
-            // Handle specific multiSend contract errors
-            if (errorMessage.includes('Invalid multiSend contract address')) {
-              console.warn(`MultiSend contract error on ${chain.name} - possible Safe version compatibility issue`);
-            }
-
-            if (retryCount >= maxRetries) {
-              console.error(`Failed to get owners after ${maxRetries} attempts on ${chain.name}`);
-              // Final error details logged
-              // Skip this chain if we can't get owners after all retries
-              allChainOwners[chain.name] = [];
-            } else {
-              // Add extra delay for multiSend errors before retry
+              return { chainName: chain.name, owners: fetchedOwners };
+            } catch (error) {
+              const errorMessage = error instanceof Error ? error.message : String(error);
+              console.error(`Error getting owners for ${address} on ${chain.name} (attempt ${retryCount + 1}):`, errorMessage);
               if (errorMessage.includes('Invalid multiSend contract address')) {
-                // Adding delay for multiSend error before retry
-                await new Promise(resolve => setTimeout(resolve, 200));
+                console.warn(`MultiSend contract error on ${chain.name} - possible Safe version compatibility issue`);
+              }
+              if (retryCount >= maxRetries - 1) {
+                console.error(`Failed to get owners after ${maxRetries} attempts on ${chain.name}`);
+                return { chainName: chain.name, owners: [] as string[] };
               }
             }
           }
+          return { chainName: chain.name, owners: [] as string[] };
+        })
+      );
+
+      for (const result of chainResults) {
+        if (result.status === 'fulfilled') {
+          const { chainName, owners: chainOwners } = result.value;
+          allChainOwners[chainName] = chainOwners;
+          chainOwners.forEach(owner => {
+            const ownerLower = owner.toLowerCase();
+            if (!signerCounts[ownerLower]) {
+              signerCounts[ownerLower] = [];
+            }
+            signerCounts[ownerLower].push(chainName);
+          });
         }
       }
 
-      // Find signers that appear on multiple chains
       const reusedSigners = Object.keys(signerCounts).filter(signer => signerCounts[signer].length > 1);
-
-      // Signer reuse analysis completed
 
       return { reusedSigners, allChainOwners, signerChains: signerCounts };
     } catch (error) {
       console.error('Error in multi-chain signer reuse check:', error);
       return { reusedSigners: [], allChainOwners: {}, signerChains: {} };
-    }
-  };
-
-  const checkSafeFallbackHandler = async (address: string, chain: ChainConfig): Promise<string | { error: string }> => {
-    try {
-      // Try Safe Protocol Kit first
-      const safe = await Safe.init({
-        provider: chain.rpcUrl,
-        safeAddress: address,
-      });
-
-      const fallbackHandlerAddress = await safe.getFallbackHandler();
-      return fallbackHandlerAddress;
-    } catch (error) {
-      console.error('Error checking Safe fallback handler with SDK:', error);
-
-      // Check if the error is specifically about unsupported Safe version
-      if (error instanceof Error && error.message.includes('does not support')) {
-        return { error: 'UNSUPPORTED_VERSION' };
-      }
-
-      // If SDK fails (e.g., multiSend contract address error), try direct viem fallback
-      if (error instanceof Error && error.message.includes('Invalid multiSend contract address')) {
-        // Falling back to direct viem call for getFallbackHandler
-        try {
-          const client = createClient(chain);
-          const fallbackHandlerAddress = await client.readContract({
-            address: address as `0x${string}`,
-            abi: GNOSIS_SAFE_ABI,
-            functionName: 'getFallbackHandler',
-          });
-          return fallbackHandlerAddress as string;
-        } catch (viemError) {
-          console.error('Direct viem fallback failed for getFallbackHandler:', viemError);
-          if (viemError instanceof Error && viemError.message.includes('function does not exist')) {
-            return { error: 'UNSUPPORTED_VERSION' };
-          }
-          return { error: 'GENERAL_ERROR' };
-        }
-      }
-
-      // Other types of errors (network, invalid address, etc.)
-      return { error: 'GENERAL_ERROR' };
     }
   };
 
@@ -1156,61 +1128,6 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
     };
   };
 
-  // Helper function to fetch signing speed data for status determination
-  const fetchSigningSpeedData = async (address: string, chainId: number): Promise<{ avgDuration: number | null; error?: string }> => {
-    const baseUrl = SAFE_TX_SERVICE_URLS[chainId];
-    if (!baseUrl) {
-      return { avgDuration: null, error: 'Unsupported chain' };
-    }
-
-    try {
-      // Properly checksum the address for Safe API
-      const checksummedAddress = getAddress(address);
-      const url = `${baseUrl}/api/v1/safes/${checksummedAddress}/multisig-transactions/?executed=true&limit=10&ordering=-executionDate`;
-      const response = await fetch(url, { headers: { Accept: 'application/json' } });
-      
-      if (!response.ok) {
-        return { avgDuration: null, error: `API error: ${response.status}` };
-      }
-
-      const data = await response.json();
-      const transactions = data.results || [];
-
-      if (!transactions.length) {
-        return { avgDuration: null, error: 'No executed transactions found' };
-      }
-
-      let totalDuration = 0;
-      let validTxCount = 0;
-
-      for (const tx of transactions) {
-        const confirmations = tx.confirmations || [];
-        if (!confirmations.length) continue;
-
-        const sorted = [...confirmations].sort((a, b) => 
-          (a.submissionDate || '').localeCompare(b.submissionDate || '')
-        );
-
-        const firstTime = sorted[0].submissionDate ? new Date(sorted[0].submissionDate).getTime() : null;
-        const lastTime = sorted[sorted.length - 1].submissionDate ? new Date(sorted[sorted.length - 1].submissionDate).getTime() : null;
-        
-        if (firstTime && lastTime && !isNaN(firstTime) && !isNaN(lastTime)) {
-          const durationSeconds = (lastTime - firstTime) / 1000;
-          totalDuration += durationSeconds;
-          validTxCount++;
-        }
-      }
-
-      if (validTxCount === 0) {
-        return { avgDuration: null, error: 'No valid transaction timing data' };
-      }
-
-      return { avgDuration: totalDuration / validTxCount };
-    } catch (error) {
-      return { avgDuration: null, error: error instanceof Error ? error.message : 'Unknown error' };
-    }
-  };
-
   // Helper function to check if the Safe was deployed by an official factory
   const checkSafeFactory = async (address: string, chainId: number, safeVersion: string): Promise<{
     factoryAddress: string | null;
@@ -1286,7 +1203,7 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
       }
 
       // Use multicall to batch all Safe multisig function calls
-      const { version, threshold, owners, nonce, modules } = await batchGnosisSafeCalls(addressToAnalyze, selectedChain);
+      const { version, threshold, owners, nonce, modules, guard: guardFromBatch, fallbackHandler: fallbackHandlerFromBatch } = await batchGnosisSafeCalls(addressToAnalyze, selectedChain);
 
       // Initialize all sections with loading status
       const initialResults: SecurityCheck[] = [
@@ -1312,6 +1229,76 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
       
       // Show results immediately while individual checks load in background
       setLoading(false);
+
+      // Fetch API results to use as authoritative status source
+      // This ensures the frontend and API always produce the same scores
+      fetch(`/api/${selectedChain.id}/${addressToAnalyze}`)
+        .then(res => res.ok ? res.json() : null)
+        .then(apiData => {
+          if (!apiData || !apiData.success || !apiData.checks) return;
+
+          // Map API checks by title for easy lookup
+          const apiChecksByTitle: Record<string, { status: string; message: string }> = {};
+          for (const check of apiData.checks) {
+            apiChecksByTitle[check.title] = { status: check.status, message: check.message };
+          }
+
+          // Store API statuses in ref so frontend async callbacks can reference them
+          apiStatusRef.current = {};
+          for (const [title, apiCheck] of Object.entries(apiChecksByTitle)) {
+            apiStatusRef.current[title] = apiCheck.status as 'success' | 'warning' | 'error';
+          }
+
+          setResults(currentResults => {
+            const newResults = [...currentResults];
+            const titleToIndex: Record<string, number> = {
+              'Signing Speed Analysis': 0,
+              'Signer Threshold': 1,
+              'Signer Threshold Percentage': 2,
+              'Safe Version': 3,
+              'Contract Creation Date': 4,
+              'Multisig Nonce': 5,
+              'Last Transaction Date': 6,
+              'Safe Factory': 7,
+              'Optional Modules': 8,
+              'Transaction Guard': 9,
+              'Fallback Handler': 10,
+              'Chain Configuration': 11,
+              'Owner Activity Analysis': 12,
+              'Emergency Recovery Mechanisms': 13,
+              'Contract Signers': 14,
+              'Multi-Chain Signer Analysis': 15,
+            };
+
+            for (const [title, index] of Object.entries(titleToIndex)) {
+              const apiCheck = apiChecksByTitle[title];
+              if (apiCheck && newResults[index]) {
+                // Only override status if the frontend hasn't finished its own check yet (still loading)
+                // or if we want to force consistency — always use the API status
+                const currentResult = newResults[index];
+                // Only override status from API; keep the existing message (which may contain rich React UI)
+                // unless the frontend check hasn't completed yet
+                if (currentResult.status === 'loading') {
+                  newResults[index] = {
+                    ...currentResult,
+                    status: apiCheck.status as 'success' | 'warning' | 'error',
+                    message: apiCheck.message,
+                  };
+                } else {
+                  // Frontend check already completed — just ensure status matches API
+                  newResults[index] = {
+                    ...currentResult,
+                    status: apiCheck.status as 'success' | 'warning' | 'error',
+                  };
+                }
+              }
+            }
+            return newResults;
+          });
+        })
+        .catch(() => {
+          // API call failed — frontend checks still run independently
+        });
 
       // Fetch latest Safe version info and update Safe Version status
       const versionInfoPromise = getSafeVersionInfo();
@@ -1379,8 +1366,8 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
       const lastTxDatePromise = getLastTransactionDate(addressToAnalyze, selectedChain);
       const ownerActivityPromise = getOwnerLastTransactions(owners, selectedChain);
       const contractSignersPromise = checkContractSigners(owners, selectedChain);
-      const guardPromise = checkSafeGuard(addressToAnalyze, selectedChain);
-      const fallbackHandlerPromise = checkSafeFallbackHandler(addressToAnalyze, selectedChain);
+      const guardPromise = Promise.resolve(guardFromBatch);
+      const fallbackHandlerPromise = Promise.resolve(fallbackHandlerFromBatch);
       const chainConfigPromise = checkChainConfiguration(addressToAnalyze);
       const recoveryPromise = checkRecoveryMechanisms(addressToAnalyze, selectedChain, modules, threshold);
       const factoryPromise = checkSafeFactory(addressToAnalyze, selectedChain.id, version);
@@ -1502,33 +1489,12 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
 
       // Fetch module names and update modules display
       if (modules.length > 0) {
-        // Use sequential requests instead of concurrent with delays to avoid rate limiting
-        const fetchModulesSequentially = async () => {
-          const moduleDetails = [];
-          const modulesToFetch = modules.slice(0, 3);
+        const modulesToFetch = modules.slice(0, 3);
 
-          for (let i = 0; i < modulesToFetch.length; i++) {
-            const moduleAddr = modulesToFetch[i];
-
-            // Add delay between requests (except for the first one)
-            if (i > 0) {
-              await new Promise(resolve => setTimeout(resolve, 700)); // 0.7 second delay between sequential calls
-            }
-
-            // Fetching contract name for module
-            const name = await getContractName(moduleAddr, selectedChain);
-            // Got contract name for module
-
-            moduleDetails.push({
-              address: moduleAddr,
-              name: name
-            });
-          }
-
-          return moduleDetails;
-        };
-
-        fetchModulesSequentially().then(moduleDetails => {
+        Promise.all(modulesToFetch.map(async (moduleAddr) => {
+          const name = await getContractName(moduleAddr, selectedChain);
+          return { address: moduleAddr, name };
+        })).then(moduleDetails => {
           setResults(currentResults => {
             const newResults = [...currentResults];
             newResults[8] = {
@@ -1674,9 +1640,13 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
         setResults(currentResults => {
           const newResults = [...currentResults];
 
-          // Check if result is an error object
-          if (typeof guardResult === 'object' && guardResult !== null && 'error' in guardResult) {
-            // Handle different types of errors
+          if (!guardResult) {
+            newResults[9] = {
+              title: 'Transaction Guard',
+              status: 'warning',
+              message: 'Could not check transaction guard status'
+            };
+          } else if (typeof guardResult === 'object' && 'error' in guardResult) {
             if (guardResult.error === 'UNSUPPORTED_VERSION') {
               newResults[9] = {
                 title: 'Transaction Guard',
@@ -1732,22 +1702,12 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
         setResults(currentResults => {
           const newResults = [...currentResults];
 
-          // Check if result is an error object
-          if (typeof fallbackHandlerResult === 'object' && fallbackHandlerResult !== null && 'error' in fallbackHandlerResult) {
-            // Handle different types of errors
-            if (fallbackHandlerResult.error === 'UNSUPPORTED_VERSION') {
-              newResults[10] = {
-                title: 'Fallback Handler',
-                status: 'warning',
-                message: 'Could not check fallback handler status (Safe version too old for Safe SDK support)'
-              };
-            } else {
-              newResults[10] = {
-                title: 'Fallback Handler',
-                status: 'warning',
-                message: 'Could not check fallback handler status (requires Safe SDK support)'
-              };
-            }
+          if (!fallbackHandlerResult) {
+            newResults[10] = {
+              title: 'Fallback Handler',
+              status: 'warning',
+              message: 'Could not check fallback handler status'
+            };
           } else if (fallbackHandlerResult === '0x0000000000000000000000000000000000000000' || fallbackHandlerResult === '') {
             // No fallback handler enabled (good)
             newResults[10] = {
@@ -1941,44 +1901,37 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
       // Update Signing Speed Analysis (skip for 1-of-N — single signer always has zero
       // duration, and the threshold check already penalizes this configuration)
       if (thresholdNum > 1) {
-        fetchSigningSpeedData(addressToAnalyze, selectedChain.id).then(speedData => {
+        fetchAndAnalyzeSafe(addressToAnalyze, selectedChain.id).then(speedAnalysis => {
           setResults(currentResults => {
             const newResults = [...currentResults];
 
-            if (speedData.error) {
-              // Error fetching data
-              newResults[0] = {
-                title: 'Signing Speed Analysis',
-                status: 'warning',
-                message: `Could not analyze signing speed: ${speedData.error}`
-              };
-            } else if (speedData.avgDuration !== null) {
-              // Determine status based on average duration
-              // < 10 min = error (too fast), < 6 hours = warning, >= 6 hours = success
-              const status = speedData.avgDuration < 600 ? 'error' :
-                            speedData.avgDuration < 21600 ? 'warning' : 'success';
+            const status = speedAnalysis.average_duration_seconds < 600 ? 'error' :
+                          speedAnalysis.average_duration_seconds < 21600 ? 'warning' : 'success';
 
-              newResults[0] = {
-                title: 'Signing Speed Analysis',
-                status,
-                message: (
-                  <SpeedTest
-                    address={addressToAnalyze}
-                    chainId={selectedChain.id}
-                    chainName={selectedChain.name}
-                    explorerUrl={selectedChain.explorerUrl}
-                  />
-                )
-              };
-            } else {
-              // No data available
-              newResults[0] = {
-                title: 'Signing Speed Analysis',
-                status: 'warning',
-                message: 'No transaction data available for signing speed analysis'
-              };
-            }
+            newResults[0] = {
+              title: 'Signing Speed Analysis',
+              status,
+              message: (
+                <SpeedTest
+                  address={addressToAnalyze}
+                  chainId={selectedChain.id}
+                  chainName={selectedChain.name}
+                  explorerUrl={selectedChain.explorerUrl}
+                  initialData={speedAnalysis}
+                />
+              )
+            };
 
+            return newResults;
+          });
+        }).catch(() => {
+          setResults(currentResults => {
+            const newResults = [...currentResults];
+            newResults[0] = {
+              title: 'Signing Speed Analysis',
+              status: 'warning',
+              message: 'No transaction data available for signing speed analysis'
+            };
             return newResults;
           });
         });
