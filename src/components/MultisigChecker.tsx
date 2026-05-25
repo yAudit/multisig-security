@@ -7,7 +7,7 @@ import Safe from '@safe-global/protocol-kit';
 import { GNOSIS_SAFE_ABI, OFFICIAL_SAFE_FALLBACK_HANDLERS, OFFICIAL_SAFE_PROXY_FACTORIES, SAFE_VERSIONS_WITH_KNOWN_FACTORIES, SENTINEL_MODULES_ADDRESS } from '../constants/contracts';
 import { SUPPORTED_CHAINS, DEFAULT_CHAIN, CHAIN_ID_MAP, CHAIN_EXAMPLES, SAFE_TX_SERVICE_URLS, SAFE_GITHUB_RELEASES_URL, type ChainConfig, isBlockscout, buildExplorerApiUrl } from '../constants/chains';
 import { getTooltipInfo } from '../constants/tooltips';
-import { Search, Share2, Info, CheckCircle, AlertTriangle, XCircle, Loader2, ChevronDown, ShieldAlert, Shield } from 'lucide-react';
+import { Search, Share2, Info, CheckCircle, AlertTriangle, XCircle, Loader2, ChevronDown, ShieldAlert, Shield, HelpCircle } from 'lucide-react';
 import { cn, truncateHash } from '@/lib/utils';
 import { calculateSecurityScore, PENALTY_CONFIG, DEFAULT_PENALTY } from '@/lib/scoring';
 import { SpeedTest, fetchAndAnalyzeSafe } from './SpeedTest';
@@ -35,7 +35,7 @@ const isContractRevertError = (error: unknown): boolean => {
 
 interface SecurityCheck {
   title: string;
-  status: 'success' | 'warning' | 'error' | 'loading';
+  status: 'success' | 'warning' | 'error' | 'loading' | 'unavailable';
   message: string | React.ReactNode;
 }
 
@@ -120,19 +120,20 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
   const [selectedExample, setSelectedExample] = useState('');
 
   // Ref to track API-authoritative statuses so frontend async callbacks don't overwrite them
-  const apiStatusRef = React.useRef<Record<string, 'success' | 'warning' | 'error'>>({});
+  const apiStatusRef = React.useRef<Record<string, 'success' | 'warning' | 'error' | 'unavailable'>>({});
 
-  // Whenever results change, reconcile any frontend status with the API-authoritative status.
-  // This guarantees the frontend's displayed statuses (and therefore score) always match the API.
+  // Reconcile frontend statuses with the API-authoritative statuses.
+  // The API overrides the frontend unless the frontend already determined data was unavailable
+  // (the API may default failed reads to "success" via zero-address fallbacks).
   React.useEffect(() => {
     const apiStatuses = apiStatusRef.current;
-    if (Object.keys(apiStatuses).length === 0) return; // No API data yet
+    if (Object.keys(apiStatuses).length === 0) return;
 
     setResults(prevResults => {
       let needsUpdate = false;
       const newResults = prevResults.map(r => {
         const apiStatus = apiStatuses[r.title];
-        if (apiStatus && r.status !== 'loading' && r.status !== apiStatus) {
+        if (apiStatus && r.status !== 'loading' && r.status !== 'unavailable' && r.status !== apiStatus) {
           needsUpdate = true;
           return { ...r, status: apiStatus };
         }
@@ -1241,7 +1242,7 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
           // Store API statuses in ref so frontend async callbacks can reference them
           apiStatusRef.current = {};
           for (const [title, apiCheck] of Object.entries(apiChecksByTitle)) {
-            apiStatusRef.current[title] = apiCheck.status as 'success' | 'warning' | 'error';
+            apiStatusRef.current[title] = apiCheck.status as 'success' | 'warning' | 'error' | 'unavailable';
           }
 
           setResults(currentResults => {
@@ -1276,14 +1277,13 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
                 if (currentResult.status === 'loading') {
                   newResults[index] = {
                     ...currentResult,
-                    status: apiCheck.status as 'success' | 'warning' | 'error',
+                    status: apiCheck.status as 'success' | 'warning' | 'error' | 'unavailable',
                     message: apiCheck.message,
                   };
-                } else {
-                  // Frontend check already completed — just ensure status matches API
+                } else if (currentResult.status !== 'unavailable') {
                   newResults[index] = {
                     ...currentResult,
-                    status: apiCheck.status as 'success' | 'warning' | 'error',
+                    status: apiCheck.status as 'success' | 'warning' | 'error' | 'unavailable',
                   };
                 }
               }
@@ -1386,7 +1386,7 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
           } else {
             newResults[4] = {
               title: 'Contract Creation Date',
-              status: 'warning',
+              status: 'unavailable',
               message: 'Could not determine contract creation date'
             };
           }
@@ -1415,7 +1415,7 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
           if (error || isOfficial === null) {
             newResults[7] = {
               title: 'Safe Factory',
-              status: 'warning',
+              status: 'unavailable',
               message: 'Could not determine deployment factory.'
             };
           } else if (isOfficial) {
@@ -1566,7 +1566,7 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
             // API error or other issue - nonce > 0 but couldn't get transaction date
             newResults[6] = {
               title: 'Last Transaction Date',
-              status: 'warning',
+              status: 'unavailable',
               message: 'Could not determine last transaction date'
             };
           }
@@ -1583,7 +1583,7 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
             // All owners had errors, likely due to missing API key or unsupported chain
             newResults[12] = {
               title: 'Owner Activity Analysis',
-              status: 'warning',
+              status: 'unavailable',
               message: 'Could not analyze owner activity (Explorer API key required)'
             };
           } else if (activeOwners.length === 0) {
@@ -1638,13 +1638,13 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
           if (!guardResult) {
             newResults[9] = {
               title: 'Transaction Guard',
-              status: 'warning',
+              status: 'unavailable',
               message: 'Could not check transaction guard status'
             };
           } else if (typeof guardResult === 'object' && 'error' in guardResult) {
             newResults[9] = {
               title: 'Transaction Guard',
-              status: 'warning',
+              status: 'unavailable',
               message: 'Could not check transaction guard status (Safe version too old for guard support)'
             };
           } else if (guardResult === '0x0000000000000000000000000000000000000000' || guardResult === '') {
@@ -1692,7 +1692,7 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
           if (!fallbackHandlerResult) {
             newResults[10] = {
               title: 'Fallback Handler',
-              status: 'warning',
+              status: 'unavailable',
               message: 'Could not check fallback handler status'
             };
           } else if (fallbackHandlerResult === '0x0000000000000000000000000000000000000000' || fallbackHandlerResult === '') {
@@ -1770,7 +1770,7 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
             // Should not happen as we already verified the contract exists
             newResults[11] = {
               title: 'Chain Configuration',
-              status: 'error',
+              status: 'unavailable',
               message: 'Could not verify Safe deployment on any chain'
             };
           } else if (totalDeployments === 1) {
@@ -1862,7 +1862,7 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
                 const updatedResults = [...currentResults];
                 updatedResults[15] = {
                   title: 'Multi-Chain Signer Analysis',
-                  status: 'error',
+                  status: 'unavailable',
                   message: 'Could not analyze signer reuse across chains'
                 };
                 return updatedResults;
@@ -1878,7 +1878,7 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
           const newResults = [...currentResults];
           newResults[11] = {
             title: 'Chain Configuration',
-            status: 'warning',
+            status: 'unavailable',
             message: 'Could not complete multi-chain deployment check'
           };
           return newResults;
@@ -1916,7 +1916,7 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
             const newResults = [...currentResults];
             newResults[0] = {
               title: 'Signing Speed Analysis',
-              status: 'warning',
+              status: 'unavailable',
               message: 'No transaction data available for signing speed analysis'
             };
             return newResults;
@@ -2093,7 +2093,7 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
           const newResults = [...currentResults];
           newResults[13] = {
             title: 'Emergency Recovery Mechanisms',
-            status: 'warning',
+            status: 'unavailable',
             message: 'Could not check recovery mechanisms'
           };
           return newResults;
@@ -2444,11 +2444,16 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
                   <h2 className="text-lg font-semibold text-[var(--color-text-primary)]">
                     Security Analysis Results
                   </h2>
-                  {/* Show loading indicator when some results are still loading */}
                   {results.some(r => r.status === 'loading') && (
                     <div className="flex items-center gap-2 text-sm text-[var(--color-text-tertiary)]">
                       <Loader2 className="h-4 w-4 animate-spin" />
                       <span>Analyzing...</span>
+                    </div>
+                  )}
+                  {!results.some(r => r.status === 'loading') && (securityScore.unavailableChecks > 0) && (
+                    <div className="flex items-center gap-2 text-sm text-[var(--color-text-tertiary)]">
+                      <HelpCircle className="h-4 w-4" />
+                      <span>Incomplete</span>
                     </div>
                   )}
                 </div>
@@ -2481,6 +2486,22 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
                       </span>
                     </div>
                   </div>
+
+                  {(results.some(r => r.status === 'loading') || securityScore.unavailableChecks > 0) && (
+                    <div className="mb-4 flex items-center justify-center gap-1.5 text-xs text-[var(--color-text-tertiary)]">
+                      {results.some(r => r.status === 'loading') ? (
+                        <>
+                          <Loader2 className="h-3 w-3 animate-spin" />
+                          <span>Score based on {securityScore.completedChecks} of {securityScore.totalChecks} checks — analysis in progress</span>
+                        </>
+                      ) : (
+                        <>
+                          <HelpCircle className="h-3 w-3" />
+                          <span>Score based on {securityScore.completedChecks} of {securityScore.totalChecks} checks — {securityScore.unavailableChecks} check{securityScore.unavailableChecks !== 1 ? 's' : ''} could not be completed</span>
+                        </>
+                      )}
+                    </div>
+                  )}
 
                   {/* Security Bar */}
                   <div className="mx-auto max-w-md">
@@ -2584,19 +2605,23 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
                       </div>
                     ) : (
                       <div className={cn(
-                        "rounded-lg border p-4",
-                        result.status === 'success' && "bg-[var(--color-success-bg)] border-[var(--color-success)]/30",
-                        result.status === 'warning' && "bg-[var(--color-warning-bg)] border-[var(--color-warning)]/30",
-                        result.status === 'error' && "bg-[var(--color-error-bg)] border-[var(--color-error)]/30"
-                      )}>
-                        {result.status !== 'success' && (
+                          "rounded-lg border p-4",
+                          result.status === 'success' && "bg-[var(--color-success-bg)] border-[var(--color-success)]/30",
+                          result.status === 'warning' && "bg-[var(--color-warning-bg)] border-[var(--color-warning)]/30",
+                          result.status === 'error' && "bg-[var(--color-error-bg)] border-[var(--color-error)]/30",
+                          result.status === 'unavailable' && "bg-[var(--color-surface-secondary)] border-[var(--color-border)]"
+                        )}>
+                        {result.status !== 'success' && result.status !== 'unavailable' && (
                           <div className="mb-2">
                             <span className="text-xs text-[var(--color-text-tertiary)]">
                               Score impact: -{result.status === 'error' ? speedPenaltyConfig.error : speedPenaltyConfig.warning} points (Heavily weighted)
                             </span>
                           </div>
                         )}
-                        {result.message}
+                        <div className="flex items-start gap-3">
+                          {result.status === 'unavailable' && <HelpCircle className="h-5 w-5 shrink-0 text-[var(--color-text-tertiary)]" />}
+                          <span>{result.message}</span>
+                        </div>
                       </div>
                     )}
                   </div>
@@ -2616,7 +2641,8 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
                   result.status === 'success' && "bg-[var(--color-success-bg)] border-[var(--color-success)]/30",
                   result.status === 'warning' && "bg-[var(--color-warning-bg)] border-[var(--color-warning)]/30",
                   result.status === 'error' && "bg-[var(--color-error-bg)] border-[var(--color-error)]/30",
-                  result.status === 'loading' && "bg-[var(--color-primary-100)] border-[var(--color-primary)]/30"
+                  result.status === 'loading' && "bg-[var(--color-primary-100)] border-[var(--color-primary)]/30",
+                  result.status === 'unavailable' && "bg-[var(--color-surface-secondary)] border-[var(--color-border)]"
                 )}
               >
                 <div className="flex items-start gap-4">
@@ -2625,6 +2651,7 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
                     {result.status === 'warning' && <AlertTriangle className="h-5 w-5 text-[var(--color-warning)]" />}
                     {result.status === 'error' && <XCircle className="h-5 w-5 text-[var(--color-error)]" />}
                     {result.status === 'loading' && <Loader2 className="h-5 w-5 animate-spin text-[var(--color-primary)]" />}
+                    {result.status === 'unavailable' && <HelpCircle className="h-5 w-5 text-[var(--color-text-tertiary)]" />}
                   </div>
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2 flex-wrap">
@@ -2633,7 +2660,8 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
                         result.status === 'success' && "text-[var(--color-success)]",
                         result.status === 'warning' && "text-[var(--color-warning)]",
                         result.status === 'error' && "text-[var(--color-error)]",
-                        result.status === 'loading' && "text-[var(--color-primary)]"
+                        result.status === 'loading' && "text-[var(--color-primary)]",
+                        result.status === 'unavailable' && "text-[var(--color-text-tertiary)]"
                       )}>{result.title}</h3>
                       
                       <button
@@ -2643,7 +2671,8 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
                           result.status === 'success' && "text-[var(--color-success)]/70 hover:text-[var(--color-success)]",
                           result.status === 'warning' && "text-[var(--color-warning)]/70 hover:text-[var(--color-warning)]",
                           result.status === 'error' && "text-[var(--color-error)]/70 hover:text-[var(--color-error)]",
-                          result.status === 'loading' && "text-[var(--color-primary)]/70 hover:text-[var(--color-primary)]"
+                          result.status === 'loading' && "text-[var(--color-primary)]/70 hover:text-[var(--color-primary)]",
+                          result.status === 'unavailable' && "text-[var(--color-text-tertiary)]/70 hover:text-[var(--color-text-tertiary)]"
                         )}
                         aria-label="Show information"
                       >
@@ -2652,7 +2681,7 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
                     </div>
                     
                     {/* Show penalty info for non-success results */}
-                    {result.status !== 'success' && result.status !== 'loading' && (
+                    {result.status !== 'success' && result.status !== 'loading' && result.status !== 'unavailable' && (
                       <div className="mt-1.5 text-xs text-[var(--color-text-tertiary)]">
                         Score impact: -{result.status === 'error' ? penaltyConfig.error : penaltyConfig.warning} points
                         {penaltyConfig.isCritical && ' (Critical)'}

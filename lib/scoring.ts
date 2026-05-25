@@ -20,6 +20,9 @@ export interface SecurityScoreResult {
   description: string;
   penalties: { title: string; points: number; isCritical: boolean }[];
   criticalCount: number;
+  completedChecks: number;
+  totalChecks: number;
+  unavailableChecks: number;
 }
 
 export const PENALTY_CONFIG: Record<string, PenaltyConfig> = {
@@ -143,10 +146,11 @@ export const DEFAULT_PENALTY: PenaltyConfig = {
  * frontend's SecurityCheck (which includes `loading` status and ReactNode messages).
  */
 export function calculateSecurityScore(checks: ScoringInput[]): SecurityScoreResult {
-  // Filter out loading/incomplete checks (no-op for API which never passes them)
-  const completedChecks = checks.filter(c => c && c.status && c.status !== 'loading');
+  const totalChecks = checks.length;
+  const unavailableChecks = checks.filter(c => c && c.status === 'unavailable').length;
+  const completedChecks = checks.filter(c => c && c.status && c.status !== 'loading' && c.status !== 'unavailable').length;
 
-  if (completedChecks.length === 0) {
+  if (completedChecks === 0) {
     return {
       rawScore: 0,
       position: 0,
@@ -154,6 +158,9 @@ export function calculateSecurityScore(checks: ScoringInput[]): SecurityScoreRes
       description: 'Analysis in progress...',
       penalties: [],
       criticalCount: 0,
+      completedChecks,
+      totalChecks,
+      unavailableChecks,
     };
   }
 
@@ -161,7 +168,9 @@ export function calculateSecurityScore(checks: ScoringInput[]): SecurityScoreRes
   let criticalFailures = 0;
   const penalties: { title: string; points: number; isCritical: boolean }[] = [];
 
-  for (const check of completedChecks) {
+  for (const check of checks) {
+    if (!check || !check.status || check.status === 'loading' || check.status === 'unavailable') continue;
+
     if (!PENALTY_CONFIG[check.title]) {
       console.warn(
         `[scoring] No penalty config for check "${check.title}" — using default (${DEFAULT_PENALTY.error}/${DEFAULT_PENALTY.warning})`
@@ -179,8 +188,6 @@ export function calculateSecurityScore(checks: ScoringInput[]): SecurityScoreRes
     }
   }
 
-  // Compounding penalty for multiple critical errors (warnings excluded —
-  // they already deduct points and shouldn't also trigger compounding)
   if (criticalFailures >= 3) {
     score -= 8;
     penalties.push({ title: 'Multiple Critical Issues', points: 8, isCritical: true });
@@ -192,7 +199,6 @@ export function calculateSecurityScore(checks: ScoringInput[]): SecurityScoreRes
 
   const rawScore = Math.max(0, Math.min(100, score));
 
-  // Position on slider with curve that emphasizes good vs bad
   let position: number;
   if (rawScore >= 65) {
     position = 66 + (rawScore - 65) * 0.83;
@@ -224,5 +230,8 @@ export function calculateSecurityScore(checks: ScoringInput[]): SecurityScoreRes
     description,
     penalties: penalties.sort((a, b) => b.points - a.points),
     criticalCount: criticalFailures,
+    completedChecks,
+    totalChecks,
+    unavailableChecks,
   };
 }

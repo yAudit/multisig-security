@@ -42,7 +42,7 @@ const safeVersionCache: {
 interface SecurityCheck {
   id: string;
   title: string;
-  status: 'success' | 'warning' | 'error';
+  status: 'success' | 'warning' | 'error' | 'unavailable';
   message: string;
   details?: Record<string, unknown>;
 }
@@ -60,8 +60,8 @@ interface ApiResponse {
     owners: string[];
     nonce: number;
     modules: string[];
-    guard: string;
-    fallbackHandler: string;
+    guard: string | null;
+    fallbackHandler: string | null;
   };
   securityScore?: {
     score: number;
@@ -70,6 +70,9 @@ interface ApiResponse {
     description: string;
     penalties: { title: string; points: number; isCritical: boolean }[];
     criticalCount: number;
+    completedChecks: number;
+    totalChecks: number;
+    unavailableChecks: number;
   };
   checks?: SecurityCheck[];
 }
@@ -247,13 +250,13 @@ export async function GET(
         });
         modules = moduleArray as string[];
       } catch {}
-      let guard = '0x0000000000000000000000000000000000000000';
+      let guard: string | null = null;
       try {
         guard = await executeWithBackup((client) => {
           return client.readContract({ address: address as `0x${string}`, abi: [{"inputs":[],"name":"getGuard","outputs":[{"internalType":"address","name":"","type":"address"}],"stateMutability":"view","type":"function"}], functionName: 'getGuard', args: [] });
         });
       } catch {}
-      let fallbackHandler = '0x0000000000000000000000000000000000000000';
+      let fallbackHandler: string | null = null;
       try {
         fallbackHandler = await executeWithBackup((client) => {
           return client.readContract({ address: address as `0x${string}`, abi: [{"inputs":[],"name":"getFallbackHandler","outputs":[{"internalType":"address","name":"handler","type":"address"}],"stateMutability":"view","type":"function"}], functionName: 'getFallbackHandler', args: [] });
@@ -268,8 +271,8 @@ export async function GET(
     let owners: string[] = [];
     let nonce = 0;
     let modules: string[] = [];
-    let guard = '0x0000000000000000000000000000000000000000';
-    let fallbackHandler = '0x0000000000000000000000000000000000000000';
+    let guard: string | null = null;
+    let fallbackHandler: string | null = null;
 
     try {
       const multicallData = await executeWithBackup((client) => {
@@ -298,8 +301,8 @@ export async function GET(
       owners = ownersResult.result as string[];
       nonce = Number(nonceResult.result);
       modules = modulesResult.status === 'success' ? [...(modulesResult.result as any)[0]] as string[] : [];
-      guard = guardResult.status === 'success' ? guardResult.result as string : '0x0000000000000000000000000000000000000000';
-      fallbackHandler = fallbackHandlerResult.status === 'success' ? fallbackHandlerResult.result as string : '0x0000000000000000000000000000000000000000';
+      guard = guardResult.status === 'success' ? guardResult.result as string : null;
+      fallbackHandler = fallbackHandlerResult.status === 'success' ? fallbackHandlerResult.result as string : null;
     } catch (multicallError) {
       if (isContractRevertError(multicallError) || (multicallError instanceof Error && /revert|does not appear/i.test(multicallError.message))) {
         const errorResponse: ApiResponse = { address, chainId: parseInt(chainId), chainName: chain.name, analyzedAt: new Date().toISOString(), success: false, error: 'This address is a contract but does not appear to be a Gnosis Safe multisig. Only Safe multisig addresses are supported.' };
@@ -328,7 +331,7 @@ export async function GET(
     const successResponse: ApiResponse = {
       address, chainId: parseInt(chainId), chainName: chain.name, analyzedAt: new Date().toISOString(), success: true,
       safeInfo: { version, threshold, owners, nonce, modules, guard, fallbackHandler },
-      securityScore: { score: securityScore.rawScore, rating: securityScore.rating, position: securityScore.position, description: securityScore.description, penalties: securityScore.penalties, criticalCount: securityScore.criticalCount },
+      securityScore: { score: securityScore.rawScore, rating: securityScore.rating, position: securityScore.position, description: securityScore.description, penalties: securityScore.penalties, criticalCount: securityScore.criticalCount, completedChecks: securityScore.completedChecks, totalChecks: securityScore.totalChecks, unavailableChecks: securityScore.unavailableChecks },
       checks
     };
 
@@ -350,18 +353,25 @@ export async function GET(
 
 async function performAllSecurityChecks(params: {
   address: string; chainId: number; version: string; threshold: number; owners: string[];
-  nonce: number; modules: string[]; guard: string; fallbackHandler: string; client: any;
+  nonce: number; modules: string[]; guard: string | null; fallbackHandler: string | null; client: any;
 }): Promise<SecurityCheck[]> {
   const { address, chainId, version, threshold, owners, nonce, modules, guard, fallbackHandler, client } = params;
 
-  // Synchronous checks (computed from already-fetched data)
   const thresholdPct = owners.length > 0 ? (threshold / owners.length) * 100 : 0;
   const thresholdStatus: SecurityCheck['status'] = threshold === 1 ? 'error' : threshold <= THRESHOLD_LOW_ABSOLUTE && thresholdPct < THRESHOLD_MAJORITY_PCT ? 'warning' : 'success';
   const pctStatus: SecurityCheck['status'] = thresholdPct < THRESHOLD_LOW_PCT ? 'error' : thresholdPct < THRESHOLD_MAJORITY_PCT ? 'warning' : 'success';
   const nonceStatus: SecurityCheck['status'] = nonce <= NONCE_ERROR_MAX ? 'error' : nonce <= NONCE_WARNING_MAX ? 'warning' : 'success';
-  const isZeroGuard = guard === '0x0000000000000000000000000000000000000000' || guard === '';
-  const isOfficialHandler = OFFICIAL_SAFE_FALLBACK_HANDLERS[fallbackHandler.toLowerCase()];
-  const fbStatus: SecurityCheck['status'] = (fallbackHandler === '0x0000000000000000000000000000000000000000' || fallbackHandler === '') ? 'success' : isOfficialHandler ? 'success' : 'warning';
+
+  const guardCheck: SecurityCheck = guard === null
+    ? { id: 'transaction_guard', title: 'Transaction Guard', status: 'unavailable', message: 'Could not check transaction guard status' }
+    : guard === '0x0000000000000000000000000000000000000000' || guard === ''
+      ? { id: 'transaction_guard', title: 'Transaction Guard', status: 'success', message: 'No transaction guard enabled. Uses standard Safe transaction execution.', details: { guard } }
+      : { id: 'transaction_guard', title: 'Transaction Guard', status: 'warning', message: 'Transaction guard is enabled. Review guard contract security.', details: { guard } };
+
+  const isOfficialHandler = fallbackHandler && OFFICIAL_SAFE_FALLBACK_HANDLERS[fallbackHandler.toLowerCase()];
+  const fbStatus: SecurityCheck['status'] = fallbackHandler === null
+    ? 'unavailable'
+    : (fallbackHandler === '0x0000000000000000000000000000000000000000' || fallbackHandler === '') ? 'success' : isOfficialHandler ? 'success' : 'warning';
 
   // Run all async checks in parallel
   const [
@@ -399,8 +409,8 @@ async function performAllSecurityChecks(params: {
     lastTransactionCheck,
     safeFactoryCheck,
     { id: 'optional_modules', title: 'Optional Modules', status: modules.length === 0 ? 'success' : 'warning', message: modules.length === 0 ? 'No optional modules are enabled. Uses standard Safe functionality only.' : `${modules.length} module${modules.length === 1 ? '' : 's'} enabled. Review module security.`, details: { modules, count: modules.length } },
-    { id: 'transaction_guard', title: 'Transaction Guard', status: isZeroGuard ? 'success' : 'warning', message: isZeroGuard ? 'No transaction guard enabled. Uses standard Safe transaction execution.' : 'Transaction guard is enabled. Review guard contract security.', details: { guard } },
-    { id: 'fallback_handler', title: 'Fallback Handler', status: fbStatus, message: (fallbackHandler === '0x0000000000000000000000000000000000000000' || fallbackHandler === '') ? 'No fallback handler enabled. Uses standard Safe functionality only.' : isOfficialHandler ? `Known Safe fallback handler enabled: ${isOfficialHandler}` : 'Custom fallback handler enabled. Review handler contract security.', details: { fallbackHandler, isOfficial: !!isOfficialHandler } },
+    guardCheck,
+    { id: 'fallback_handler', title: 'Fallback Handler', status: fbStatus, message: fallbackHandler === null ? 'Could not check fallback handler status' : (fallbackHandler === '0x0000000000000000000000000000000000000000' || fallbackHandler === '') ? 'No fallback handler enabled. Uses standard Safe functionality only.' : isOfficialHandler ? `Known Safe fallback handler enabled: ${isOfficialHandler}` : 'Custom fallback handler enabled. Review handler contract security.', details: { fallbackHandler, isOfficial: !!isOfficialHandler } },
     multiChainResult.check,
     ownerActivityCheck,
     emergencyRecoveryCheck,
@@ -412,17 +422,17 @@ async function performAllSecurityChecks(params: {
 // 1. Signing Speed
 async function checkSigningSpeed(address: string, chainId: number): Promise<SecurityCheck> {
   const baseUrl = SAFE_TX_SERVICE_URLS[chainId];
-  if (!baseUrl) return { id: 'signing_speed_analysis', title: 'Signing Speed Analysis', status: 'warning', message: 'Could not analyze signing speed: Unsupported chain' };
+  if (!baseUrl) return { id: 'signing_speed_analysis', title: 'Signing Speed Analysis', status: 'unavailable', message: 'Could not analyze signing speed: Unsupported chain' };
 
   try {
     const checksummedAddress = getAddress(address);
     const url = `${baseUrl}/api/v1/safes/${checksummedAddress}/multisig-transactions/?executed=true&limit=10&ordering=-executionDate`;
     const response = await fetch(url, { headers: { Accept: 'application/json' } });
-    if (!response.ok) return { id: 'signing_speed_analysis', title: 'Signing Speed Analysis', status: 'warning', message: `Could not analyze signing speed: API error ${response.status}` };
+    if (!response.ok) return { id: 'signing_speed_analysis', title: 'Signing Speed Analysis', status: 'unavailable', message: `Could not analyze signing speed: API error ${response.status}` };
 
     const data = await response.json();
     const transactions = data.results || [];
-    if (!transactions.length) return { id: 'signing_speed_analysis', title: 'Signing Speed Analysis', status: 'warning', message: 'No transaction data available for signing speed analysis' };
+    if (!transactions.length) return { id: 'signing_speed_analysis', title: 'Signing Speed Analysis', status: 'unavailable', message: 'No transaction data available for signing speed analysis' };
 
     let totalDuration = 0;
     let validTxCount = 0;
@@ -437,14 +447,14 @@ async function checkSigningSpeed(address: string, chainId: number): Promise<Secu
         validTxCount++;
       }
     }
-    if (validTxCount === 0) return { id: 'signing_speed_analysis', title: 'Signing Speed Analysis', status: 'warning', message: 'No valid transaction timing data' };
+    if (validTxCount === 0) return { id: 'signing_speed_analysis', title: 'Signing Speed Analysis', status: 'unavailable', message: 'No valid transaction timing data' };
 
     const avgDuration = totalDuration / validTxCount;
     const status: SecurityCheck['status'] = avgDuration < SIGNING_SPEED_ERROR_SECONDS ? 'error' : avgDuration < SIGNING_SPEED_WARNING_SECONDS ? 'warning' : 'success';
     const fmt = (s: number) => s < 60 ? `${Math.round(s)} seconds` : s < 3600 ? `${Math.round(s / 60)} minutes` : s < 86400 ? `${(s / 3600).toFixed(1)} hours` : `${(s / 86400).toFixed(1)} days`;
     return { id: 'signing_speed_analysis', title: 'Signing Speed Analysis', status, message: status === 'error' ? `Signatures collected very quickly (avg ${fmt(avgDuration)} across ${validTxCount} transactions). This may indicate centralized control.` : status === 'warning' ? `Moderate signing speed (avg ${fmt(avgDuration)} across ${validTxCount} transactions).` : `Healthy signing speed (avg ${fmt(avgDuration)} across ${validTxCount} transactions). Signatures are collected over a reasonable timeframe.`, details: { avgDurationSeconds: avgDuration, transactionsAnalyzed: validTxCount } };
   } catch (error) {
-    return { id: 'signing_speed_analysis', title: 'Signing Speed Analysis', status: 'warning', message: `Could not analyze signing speed: ${error instanceof Error ? error.message : 'Unknown error'}` };
+    return { id: 'signing_speed_analysis', title: 'Signing Speed Analysis', status: 'unavailable', message: `Could not analyze signing speed: ${error instanceof Error ? error.message : 'Unknown error'}` };
   }
 }
 
@@ -498,7 +508,14 @@ async function checkSafeVersion(version: string): Promise<SecurityCheck> {
 
     return { id: 'safe_version', title: 'Safe Version', status, message, details: { version, latestVersion, secondLatestVersion, category } };
   } catch {
-    return { id: 'safe_version', title: 'Safe Version', status: 'warning', message: `Could not check version: ${version}`, details: { version } };
+    const category = categorizeVersion(version, null, null, null);
+    const status: SecurityCheck['status'] = (category === 'latest' || category === 'second-latest') ? 'success' : category === 'old' ? 'warning' : 'error';
+    const message = category === 'latest'
+      ? `Latest version: ${version}`
+      : category === 'old'
+        ? `Outdated version: ${version}`
+        : `Very outdated version: ${version}`;
+    return { id: 'safe_version', title: 'Safe Version', status, message, details: { version, category } };
   }
 }
 
@@ -506,7 +523,7 @@ async function checkSafeVersion(version: string): Promise<SecurityCheck> {
 async function checkContractCreationDate(address: string, chainId: number): Promise<SecurityCheck> {
   const apiUrl = getExplorerApiUrl(chainId);
   const apiKey = process.env.NEXT_PUBLIC_ETHERSCAN_API_KEY || null;
-  if (!apiUrl || (!apiKey && !isBlockscout(apiUrl))) return { id: 'contract_creation_date', title: 'Contract Creation Date', status: 'warning', message: 'Could not determine contract creation date (API not available)' };
+  if (!apiUrl || (!apiKey && !isBlockscout(apiUrl))) return { id: 'contract_creation_date', title: 'Contract Creation Date', status: 'unavailable', message: 'Could not determine contract creation date (API not available)' };
 
   try {
     const apikeyParam = isBlockscout(apiUrl) ? '' : `&apikey=${apiKey}`;
@@ -515,10 +532,10 @@ async function checkContractCreationDate(address: string, chainId: number): Prom
       startblock: '0', endblock: '99999999', page: '1', offset: '20', sort: 'asc',
     }) + apikeyParam;
     const response = await fetch(url);
-    if (!response.ok) return { id: 'contract_creation_date', title: 'Contract Creation Date', status: 'warning', message: `Could not determine contract creation date: API error ${response.status}` };
+    if (!response.ok) return { id: 'contract_creation_date', title: 'Contract Creation Date', status: 'unavailable', message: `Could not determine contract creation date: API error ${response.status}` };
 
     const data = await response.json();
-    if (!data.result || data.result.length === 0) return { id: 'contract_creation_date', title: 'Contract Creation Date', status: 'warning', message: 'Could not determine contract creation date: No transactions found' };
+    if (!data.result || data.result.length === 0) return { id: 'contract_creation_date', title: 'Contract Creation Date', status: 'unavailable', message: 'Could not determine contract creation date: No transactions found' };
 
     // Find the creation transaction (where 'to' field is empty/null), matching frontend logic
     const creationTx = data.result.find((tx: { to: string | null }) => tx.to === '' || tx.to === null);
@@ -529,7 +546,7 @@ async function checkContractCreationDate(address: string, chainId: number): Prom
     const status: SecurityCheck['status'] = daysAgo <= CONTRACT_AGE_ERROR_DAYS ? 'error' : daysAgo <= CONTRACT_AGE_WARNING_DAYS ? 'warning' : 'success';
     return { id: 'contract_creation_date', title: 'Contract Creation Date', status, message: status === 'error' ? `Very recently deployed (${daysAgo} days ago). New contracts carry higher risk.` : status === 'warning' ? `Recently deployed (${daysAgo} days ago). Relatively new contract.` : `Established contract deployed ${daysAgo} days ago.`, details: { daysAgo, creationDate: creationDate.toISOString() } };
   } catch {
-    return { id: 'contract_creation_date', title: 'Contract Creation Date', status: 'warning', message: 'Could not determine contract creation date' };
+    return { id: 'contract_creation_date', title: 'Contract Creation Date', status: 'unavailable', message: 'Could not determine contract creation date' };
   }
 }
 
@@ -539,7 +556,7 @@ async function checkLastTransactionDate(address: string, chainId: number, nonce:
 
   const apiUrl = getExplorerApiUrl(chainId);
   const apiKey = process.env.NEXT_PUBLIC_ETHERSCAN_API_KEY || null;
-  if (!apiUrl || (!apiKey && !isBlockscout(apiUrl))) return { id: 'last_transaction_date', title: 'Last Transaction Date', status: 'warning', message: 'Could not determine last transaction date (API not available)' };
+  if (!apiUrl || (!apiKey && !isBlockscout(apiUrl))) return { id: 'last_transaction_date', title: 'Last Transaction Date', status: 'unavailable', message: 'Could not determine last transaction date (API not available)' };
 
   try {
     const apikeyParam = isBlockscout(apiUrl) ? '' : `&apikey=${apiKey}`;
@@ -548,10 +565,10 @@ async function checkLastTransactionDate(address: string, chainId: number, nonce:
       startblock: '0', endblock: '99999999', page: '1', offset: '1', sort: 'desc',
     }) + apikeyParam;
     const response = await fetch(url);
-    if (!response.ok) return { id: 'last_transaction_date', title: 'Last Transaction Date', status: 'warning', message: `Could not determine last transaction date: API error ${response.status}` };
+    if (!response.ok) return { id: 'last_transaction_date', title: 'Last Transaction Date', status: 'unavailable', message: `Could not determine last transaction date: API error ${response.status}` };
 
     const data = await response.json();
-    if (!data.result || data.result.length === 0) return { id: 'last_transaction_date', title: 'Last Transaction Date', status: 'warning', message: 'Could not determine last transaction date: No transactions found' };
+    if (!data.result || data.result.length === 0) return { id: 'last_transaction_date', title: 'Last Transaction Date', status: 'unavailable', message: 'Could not determine last transaction date: No transactions found' };
 
     const lastTx = data.result[0];
     const lastDate = new Date(parseInt(lastTx.timeStamp) * 1000);
@@ -560,7 +577,7 @@ async function checkLastTransactionDate(address: string, chainId: number, nonce:
     const status: SecurityCheck['status'] = daysAgo >= INACTIVITY_ERROR_DAYS ? 'error' : daysAgo >= INACTIVITY_WARNING_DAYS ? 'warning' : 'success';
     return { id: 'last_transaction_date', title: 'Last Transaction Date', status, message: status === 'error' ? `Inactive for ${daysAgo} days. Last transaction: ${lastDate.toDateString()}.` : status === 'warning' ? `Last used ${daysAgo} days ago on ${lastDate.toDateString()}.` : `Recently active. Last transaction: ${lastDate.toDateString()} (${daysAgo} days ago).`, details: { daysAgo, lastDate: lastDate.toISOString() } };
   } catch {
-    return { id: 'last_transaction_date', title: 'Last Transaction Date', status: 'warning', message: 'Could not determine last transaction date' };
+    return { id: 'last_transaction_date', title: 'Last Transaction Date', status: 'unavailable', message: 'Could not determine last transaction date' };
   }
 }
 
@@ -568,24 +585,24 @@ async function checkLastTransactionDate(address: string, chainId: number, nonce:
 async function checkSafeFactory(address: string, chainId: number, safeVersion: string): Promise<SecurityCheck> {
   const baseUrl = SAFE_TX_SERVICE_URLS[chainId];
   const versionHasKnownFactories = SAFE_VERSIONS_WITH_KNOWN_FACTORIES.has(safeVersion);
-  if (!baseUrl) return { id: 'safe_factory', title: 'Safe Factory', status: 'warning', message: 'Could not determine deployment factory: Unsupported chain' };
+  if (!baseUrl) return { id: 'safe_factory', title: 'Safe Factory', status: 'unavailable', message: 'Could not determine deployment factory: Unsupported chain' };
 
   try {
     const checksummedAddress = getAddress(address);
     const url = `${baseUrl}/api/v1/safes/${checksummedAddress}/creation/`;
     const response = await fetch(url, { headers: { Accept: 'application/json' } });
-    if (!response.ok) return { id: 'safe_factory', title: 'Safe Factory', status: 'warning', message: 'Could not determine deployment factory.' };
+    if (!response.ok) return { id: 'safe_factory', title: 'Safe Factory', status: 'unavailable', message: 'Could not determine deployment factory.' };
 
     const data = await response.json();
     const factoryAddress = data.factoryAddress;
-    if (!factoryAddress) return { id: 'safe_factory', title: 'Safe Factory', status: 'warning', message: 'Could not determine deployment factory.' };
+    if (!factoryAddress) return { id: 'safe_factory', title: 'Safe Factory', status: 'unavailable', message: 'Could not determine deployment factory.' };
 
     const factoryInfo = OFFICIAL_SAFE_PROXY_FACTORIES[factoryAddress.toLowerCase()] || null;
     if (factoryInfo) return { id: 'safe_factory', title: 'Safe Factory', status: 'success', message: `Deployed by official factory: ${factoryInfo.name}`, details: { factoryAddress, factoryName: factoryInfo.name, isOfficial: true } };
 
     return { id: 'safe_factory', title: 'Safe Factory', status: versionHasKnownFactories ? 'error' : 'warning', message: versionHasKnownFactories ? 'Deployed by unrecognized factory. Verify this Safe was not created with modified code.' : 'Deployed by unrecognized factory. No known official factories for this Safe version, so this may be expected.', details: { factoryAddress, isOfficial: false, versionHasKnownFactories } };
   } catch (error) {
-    return { id: 'safe_factory', title: 'Safe Factory', status: 'warning', message: `Could not determine deployment factory: ${error instanceof Error ? error.message : 'Unknown error'}` };
+    return { id: 'safe_factory', title: 'Safe Factory', status: 'unavailable', message: `Could not determine deployment factory: ${error instanceof Error ? error.message : 'Unknown error'}` };
   }
 }
 
@@ -629,7 +646,7 @@ async function checkMultiChainDeployment(address: string, currentChainId: number
 async function checkOwnerActivity(owners: string[], chainId: number): Promise<SecurityCheck> {
   const apiUrl = getExplorerApiUrl(chainId);
   const apiKey = process.env.NEXT_PUBLIC_ETHERSCAN_API_KEY || null;
-  if (!apiUrl || (!apiKey && !isBlockscout(apiUrl))) return { id: 'owner_activity_analysis', title: 'Owner Activity Analysis', status: 'warning', message: 'Could not analyze owner activity (Explorer API key required)', details: { ownerCount: owners.length } };
+  if (!apiUrl || (!apiKey && !isBlockscout(apiUrl))) return { id: 'owner_activity_analysis', title: 'Owner Activity Analysis', status: 'unavailable', message: 'Could not analyze owner activity (Explorer API key required)', details: { ownerCount: owners.length } };
 
   const activeOwners: string[] = [];
   const inactiveOwners: string[] = [];
@@ -669,7 +686,7 @@ async function checkOwnerActivity(owners: string[], chainId: number): Promise<Se
     }
   }
 
-  if (errorOwners.length === owners.length) return { id: 'owner_activity_analysis', title: 'Owner Activity Analysis', status: 'warning', message: 'Could not analyze owner activity (Explorer API key required)', details: { ownerCount: owners.length, activeOwners, inactiveOwners, errorOwners } };
+  if (errorOwners.length === owners.length) return { id: 'owner_activity_analysis', title: 'Owner Activity Analysis', status: 'unavailable', message: 'Could not analyze owner activity (Explorer API key required)', details: { ownerCount: owners.length, activeOwners, inactiveOwners, errorOwners } };
   if (activeOwners.length === 0) return { id: 'owner_activity_analysis', title: 'Owner Activity Analysis', status: 'success', message: `All ${inactiveOwners.length} owner${inactiveOwners.length === 1 ? '' : 's'} may be used exclusively for multisig signing (no recent non-multisig transactions).`, details: { ownerCount: owners.length, activeOwners, inactiveOwners, errorOwners } };
   return { id: 'owner_activity_analysis', title: 'Owner Activity Analysis', status: 'warning', message: `${activeOwners.length} owner${activeOwners.length === 1 ? ' has' : 's have'} recent non-multisig activity. Consider using dedicated signing addresses.`, details: { ownerCount: owners.length, activeOwners, inactiveOwners, errorOwners } };
 }
