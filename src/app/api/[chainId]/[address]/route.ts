@@ -413,7 +413,7 @@ async function checkSigningSpeed(address: string, chainId: number): Promise<Secu
   try {
     const checksummedAddress = getAddress(address);
     const url = `${baseUrl}/api/v1/safes/${checksummedAddress}/multisig-transactions/?executed=true&limit=10&ordering=-executionDate`;
-    const response = await fetch(url, { headers: { Accept: 'application/json' } });
+    const response = await fetch(url, { headers: { Accept: 'application/json' }, signal: AbortSignal.timeout(15000) });
     if (!response.ok) return { id: 'signing_speed_analysis', title: CHECK_TITLES.SIGNING_SPEED, status: 'unavailable', message: `Could not analyze signing speed: API error ${response.status}` };
 
     const data = await response.json();

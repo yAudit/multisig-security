@@ -1324,6 +1324,13 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
                     status: apiCheck.status as 'success' | 'warning' | 'error' | 'unavailable',
                     message: apiCheck.message,
                   };
+                } else if (currentResult.status === 'unavailable' && apiCheck.status !== 'unavailable') {
+                  // Frontend fetch failed but API succeeded — let the API result rescue it
+                  newResults[index] = {
+                    ...currentResult,
+                    status: apiCheck.status as 'success' | 'warning' | 'error' | 'unavailable',
+                    message: apiCheck.message,
+                  };
                 } else if (currentResult.status !== 'unavailable' && apiCheck.status !== 'unavailable') {
                   // Only override status from API if the API actually got data;
                   // never downgrade a frontend success/warning/error to API "unavailable"
@@ -1959,11 +1966,14 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
         }).catch(() => {
           safeSetResults(currentResults => {
             const newResults = [...currentResults];
-            newResults[0] = {
-              title: CHECK_TITLES.SIGNING_SPEED,
-              status: 'unavailable',
-              message: 'No transaction data available for signing speed analysis'
-            };
+            // Only set unavailable if the API hasn't already returned a real result
+            if (newResults[0].status === 'loading') {
+              newResults[0] = {
+                title: CHECK_TITLES.SIGNING_SPEED,
+                status: 'unavailable',
+                message: 'No transaction data available for signing speed analysis'
+              };
+            }
             return newResults;
           });
         });
