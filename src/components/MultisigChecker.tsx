@@ -927,6 +927,10 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
   const checkContractSigners = async (owners: readonly string[], chain: ChainConfig): Promise<string[]> => {
     const contractSigners: string[] = [];
 
+    // EIP-7702 delegation designator prefix — EOAs with active delegations return
+    // bytecode starting with 0xef01 but are still EOAs, not smart contracts.
+    const EIP7702_PREFIX = '0xef01';
+
     try {
       const client = createClient(chain);
       // Check each owner address to see if it has contract code
@@ -934,9 +938,10 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
         owners.map(async (ownerAddress) => {
           try {
             const code = await client.getBytecode({ address: ownerAddress as `0x${string}` });
+            const isContract = code !== undefined && code !== '0x' && code.length > 2 && !code.startsWith(EIP7702_PREFIX);
             return {
               address: ownerAddress,
-              hasCode: code !== undefined && code !== '0x' && code.length > 2
+              hasCode: isContract
             };
           } catch (error) {
             console.error(`Error checking code for owner ${ownerAddress}:`, error);

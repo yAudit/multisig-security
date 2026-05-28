@@ -868,10 +868,13 @@ const isRecoveryModule = KNOWN_RECOVERY_MODULE_KEYWORDS.some(keyword => lowerNam
 
 // 15. Contract Signers (parallel bytecode checks)
 async function checkContractSigners(owners: string[], client: any): Promise<SecurityCheck> {
+  // EIP-7702 delegation designator prefix — EOAs with active delegations return
+  // bytecode starting with 0xef01 but are still EOAs, not smart contracts.
+  const EIP7702_PREFIX = '0xef01';
   const results = await Promise.allSettled(owners.map(async (owner) => {
     try {
       const code = await client.getBytecode({ address: owner as `0x${string}` });
-      return (code && code !== '0x' && code.length > 2) ? owner : null;
+      return (code && code !== '0x' && code.length > 2 && !code.startsWith(EIP7702_PREFIX)) ? owner : null;
     } catch { return null; }
   }));
   const contractSigners = results.filter((r): r is PromiseFulfilledResult<string> => r.status === 'fulfilled' && r.value !== null).map(r => r.value);
