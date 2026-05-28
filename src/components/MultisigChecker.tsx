@@ -43,6 +43,15 @@ interface SecurityCheck {
 // App version — displayed in analysis header so screenshots pin the score to a release
 const APP_VERSION = 'v2.0.0';
 
+// Standard timeout for all network requests (ms)
+const FETCH_TIMEOUT_MS = 15000;
+
+// Helper: fetch with a standard timeout. Uses AbortSignal.timeout() which
+// automatically aborts the request after the specified duration.
+function fetchWithTimeout(url: string, options?: RequestInit, timeoutMs: number = FETCH_TIMEOUT_MS): Promise<Response> {
+  return fetch(url, { ...options, signal: options?.signal ?? AbortSignal.timeout(timeoutMs) });
+}
+
 // Safe Transaction Service API URLs
 // Cache for Safe version info fetched from GitHub (shared across analyses)
 const safeVersionCache: {
@@ -161,7 +170,7 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
     const rpcUrl = useBackup ? chain.backupRpcUrl : chain.rpcUrl;
     return createPublicClient({
       chain: chain.viemChain,
-      transport: http(rpcUrl)
+      transport: http(rpcUrl, { timeout: FETCH_TIMEOUT_MS })
     });
   }, []);
 
@@ -234,7 +243,7 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
     }
 
     try {
-      const response = await fetch(SAFE_GITHUB_RELEASES_URL, {
+      const response = await fetchWithTimeout(SAFE_GITHUB_RELEASES_URL, {
         headers: {
           'Accept': 'application/json',
         },
@@ -572,20 +581,12 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
       try {
         const checksummedAddr = getAddress(addr);
         const url = `${chain.safeTransactionServiceUrl}/api/v1/safes/${checksummedAddr}/creation/`;
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 10000);
-        try {
-          const response = await fetch(url, { headers: { Accept: 'application/json' }, signal: controller.signal });
-          clearTimeout(timeoutId);
-          if (response.ok) {
-            const data = await response.json();
-            if (data.created) {
-              return new Date(data.created);
-            }
+        const response = await fetchWithTimeout(url, { headers: { Accept: 'application/json' } });
+        if (response.ok) {
+          const data = await response.json();
+          if (data.created) {
+            return new Date(data.created);
           }
-        } catch (fetchErr) {
-          clearTimeout(timeoutId);
-          throw fetchErr;
         }
       } catch (err) {
         console.error('Safe Transaction Service creation date fetch failed:', err);
@@ -607,7 +608,7 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
       }) + apikeyParam;
 
       const response = await etherscanRateLimiter.makeRequest(() =>
-        fetch(apiUrl, {
+        fetchWithTimeout(apiUrl, {
           headers: {
             'Accept': 'application/json',
           },
@@ -648,21 +649,13 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
       try {
         const checksummedAddr = getAddress(addr);
         const url = `${chain.safeTransactionServiceUrl}/api/v1/safes/${checksummedAddr}/multisig-transactions/?executed=true&limit=1&ordering=-nonce`;
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 10000);
-        try {
-          const response = await fetch(url, { headers: { Accept: 'application/json' }, signal: controller.signal });
-          clearTimeout(timeoutId);
-          if (response.ok) {
-            const data = await response.json();
-            if (data.results && data.results.length > 0 && data.results[0].executionDate) {
-              return new Date(data.results[0].executionDate);
-            }
-            // No transactions found in Safe — fall through to Etherscan to catch on-chain txs
+        const response = await fetchWithTimeout(url, { headers: { Accept: 'application/json' } });
+        if (response.ok) {
+          const data = await response.json();
+          if (data.results && data.results.length > 0 && data.results[0].executionDate) {
+            return new Date(data.results[0].executionDate);
           }
-        } catch (fetchErr) {
-          clearTimeout(timeoutId);
-          throw fetchErr;
+          // No transactions found in Safe — fall through to Etherscan to catch on-chain txs
         }
       } catch (err) {
         console.error('Safe Transaction Service last tx date fetch failed:', err);
@@ -685,7 +678,7 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
 
       try {
         const response = await etherscanRateLimiter.makeRequest(() =>
-          fetch(apiUrl, {
+          fetchWithTimeout(apiUrl, {
             headers: {
               'Accept': 'application/json',
             },
@@ -742,22 +735,21 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
             startblock: '0', endblock: '99999999', page: '1', offset: '10', sort: 'desc',
           }) + apikeyParam;
 
-          // Add timeout to prevent hanging requests
-          const controller = new AbortController();
-          const timeoutId = setTimeout(() => controller.abort(), 10000); // 10 second timeout
-
           let response;
           try {
             response = await etherscanRateLimiter.makeRequest(() =>
-              fetch(apiUrl, {
+              fetchWithTimeout(apiUrl, {
                 headers: {
                   'Accept': 'application/json',
                 },
-                signal: controller.signal,
               })
             );
-          } finally {
-            clearTimeout(timeoutId);
+          } catch (err) {
+            if (err instanceof Error && err.name === 'TimeoutError') {
+              console.error(`Timeout checking owner ${ownerAddr}:`, err);
+              return { address: ownerAddr, status: 'inactive', lastTxDate: null };
+            }
+            throw err;
           }
 
           if (!response.ok) {
@@ -794,10 +786,6 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
             return { address: ownerAddr, status: 'inactive', lastTxDate: null };
           }
         } catch (error) {
-          if (error instanceof Error && error.name === 'AbortError') {
-            console.error(`Timeout checking owner ${ownerAddr}:`, error);
-            return { address: ownerAddr, status: 'error', lastTxDate: null };
-          }
           console.error(`Error checking owner ${ownerAddr}:`, error);
           return { address: ownerAddr, status: 'error', lastTxDate: null };
         }
@@ -848,23 +836,25 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
         module: 'contract', action: 'getsourcecode', address: address,
       }) + apikeyParam;
 
-      // Add timeout to prevent hanging requests
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 20000); // 20 second timeout
-
       let response;
       try {
         response = await etherscanRateLimiter.makeRequest(() =>
-          fetch(apiUrl, {
+          fetchWithTimeout(apiUrl, {
             method: 'GET',
             headers: {
               'Accept': 'application/json',
             },
-            signal: controller.signal,
           })
         );
-      } finally {
-        clearTimeout(timeoutId);
+      } catch (err) {
+        if (err instanceof Error && (err.name === 'TimeoutError' || err.name === 'AbortError')) {
+          console.error(`Timeout fetching contract name for ${address}`);
+          if (retryCount < 3) {
+            return await getContractName(address, chain, retryCount + 1);
+          }
+          return null;
+        }
+        throw err;
       }
 
       if (!response.ok) {
@@ -903,17 +893,9 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
       // For contracts without verified source code, this is expected behavior
       return address;
     } catch (error) {
-      if (error instanceof Error && error.name === 'AbortError') {
-        console.error(`Timeout fetching contract name for ${address}`);
-        // Retry on timeout if we haven't exceeded retry limit
-        if (retryCount < 3) {
-          // Retrying after timeout
-          return await getContractName(address, chain, retryCount + 1);
-        }
-      } else {
-        console.error(`Error fetching contract name for ${address}:`, error);
-        // Retry on network errors too
-        if (retryCount < 2) {
+      console.error(`Error fetching contract name for ${address}:`, error);
+      // Retry on network errors (timeout is already handled above)
+      if (retryCount < 2) {
           // Retrying after error
           return await getContractName(address, chain, retryCount + 1);
         }
@@ -924,8 +906,12 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
     }
   };
 
-  const checkContractSigners = async (owners: readonly string[], chain: ChainConfig): Promise<string[]> => {
+  const checkContractSigners = async (owners: readonly string[], chain: ChainConfig): Promise<{
+    contractSigners: string[];
+    eip7702Signers: string[];
+  }> => {
     const contractSigners: string[] = [];
+    const eip7702Signers: string[] = [];
 
     // EIP-7702 delegation designator prefix — EOAs with active delegations return
     // bytecode starting with 0xef01 but are still EOAs, not smart contracts.
@@ -938,32 +924,33 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
         owners.map(async (ownerAddress) => {
           try {
             const code = await client.getBytecode({ address: ownerAddress as `0x${string}` });
-            const isContract = code !== undefined && code !== '0x' && code.length > 2 && !code.startsWith(EIP7702_PREFIX);
-            return {
-              address: ownerAddress,
-              hasCode: isContract
-            };
+            if (code && code !== '0x' && code.length > 2) {
+              if (code.startsWith(EIP7702_PREFIX)) {
+                return { address: ownerAddress, isContract: false, isEip7702: true };
+              }
+              return { address: ownerAddress, isContract: true, isEip7702: false };
+            }
+            return { address: ownerAddress, isContract: false, isEip7702: false };
           } catch (error) {
             console.error(`Error checking code for owner ${ownerAddress}:`, error);
-            return {
-              address: ownerAddress,
-              hasCode: false
-            };
+            return { address: ownerAddress, isContract: false, isEip7702: false };
           }
         })
       );
 
-      // Collect addresses that have contract code
-      codeChecks.forEach(({ address, hasCode }) => {
-        if (hasCode) {
+      codeChecks.forEach(({ address, isContract, isEip7702 }) => {
+        if (isContract) {
           contractSigners.push(address);
+        }
+        if (isEip7702) {
+          eip7702Signers.push(address);
         }
       });
 
-      return contractSigners;
+      return { contractSigners, eip7702Signers };
     } catch (error) {
       console.error('Error checking contract signers:', error);
-      return [];
+      return { contractSigners: [], eip7702Signers: [] };
     }
   };
 
@@ -1213,14 +1200,7 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
     try {
       const checksummedAddress = getAddress(address);
       const url = `${baseUrl}/api/v1/safes/${checksummedAddress}/creation/`;
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 10000);
-      let response;
-      try {
-        response = await fetch(url, { headers: { Accept: 'application/json' }, signal: controller.signal });
-      } finally {
-        clearTimeout(timeoutId);
-      }
+      const response = await fetchWithTimeout(url, { headers: { Accept: 'application/json' } });
 
       if (!response.ok) {
         return { masterCopy: null, singletonName: null, isOfficial: null, error: `API error: ${response.status}` };
@@ -2202,27 +2182,38 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
       });
 
       // Update Contract Signers when ready
-      contractSignersPromise.then(contractSigners => {
+      contractSignersPromise.then(({ contractSigners, eip7702Signers }) => {
         safeSetResults(currentResults => {
           const newResults = [...currentResults];
 
-          if (contractSigners.length === 0) {
-            // All signers are EOAs (good)
+          if (contractSigners.length === 0 && eip7702Signers.length === 0) {
             newResults[10] = {
               title: 'Contract Signers',
               status: 'success',
               message: 'No multisig signers are contracts. All signers are externally owned accounts (EOAs).'
             };
+          } else if (contractSigners.length === 0 && eip7702Signers.length > 0) {
+            const eip7702List = eip7702Signers.length > 3
+              ? eip7702Signers.slice(0, 3).join(', ') + ` and ${eip7702Signers.length - 3} more`
+              : eip7702Signers.join(', ');
+            newResults[10] = {
+              title: 'Contract Signers',
+              status: 'success',
+              message: `No signers are contracts, but ${eip7702Signers.length} signer${eip7702Signers.length === 1 ? ' has' : 's have'} an active EIP-7702 delegation (EOA with temporary contract code). These remain EOAs controlled by their private keys. Delegated: ${eip7702List}`
+            };
           } else {
-            // Some signers are contracts (warning)
             const contractList = contractSigners.length > 3
               ? contractSigners.slice(0, 3).join(', ') + ` and ${contractSigners.length - 3} more`
               : contractSigners.join(', ');
 
+            const eip7702Note = eip7702Signers.length > 0
+              ? ` Additionally, ${eip7702Signers.length} signer${eip7702Signers.length === 1 ? ' has' : 's have'} an EIP-7702 delegation (EOA with temporary contract code).`
+              : '';
+
             newResults[10] = {
               title: 'Contract Signers',
               status: 'warning',
-              message: `${contractSigners.length} signer${contractSigners.length === 1 ? '' : 's'} ${contractSigners.length === 1 ? 'is a contract' : 'are contracts'}, not EOA${contractSigners.length === 1 ? '' : 's'}. Need to recursively check those signers. Contract signers: ${contractList}`
+              message: `${contractSigners.length} signer${contractSigners.length === 1 ? 'is a contract' : 's are contracts'}, not EOA${contractSigners.length === 1 ? '' : 's'}. Need to recursively check those signers. Contract signers: ${contractList}${eip7702Note}`
             };
           }
 

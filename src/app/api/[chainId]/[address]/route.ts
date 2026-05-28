@@ -166,7 +166,7 @@ export async function GET(
       const rpcUrl = useBackup ? chain.backupRpcUrl : chain.rpcUrl;
       return createPublicClient({
         chain: chain.viemChain,
-        transport: http(rpcUrl)
+        transport: http(rpcUrl, { timeout: 15000 })
       });
     };
 
@@ -542,7 +542,7 @@ async function checkContractCreationDate(address: string, chainId: number): Prom
     try {
       const checksummedAddress = getAddress(address);
       const url = `${txServiceUrl}/api/v1/safes/${checksummedAddress}/creation/`;
-      const response = await fetch(url, { headers: { Accept: 'application/json' }, signal: AbortSignal.timeout(10000) });
+      const response = await fetch(url, { headers: { Accept: 'application/json' }, signal: AbortSignal.timeout(15000) });
       if (response.ok) {
         const data = await response.json();
         if (data.created) {
@@ -597,7 +597,7 @@ async function checkLastTransactionDate(address: string, chainId: number, nonce:
     try {
       const checksummedAddress = getAddress(address);
       const url = `${txServiceUrl}/api/v1/safes/${checksummedAddress}/multisig-transactions/?executed=true&limit=1&ordering=-nonce`;
-      const response = await fetch(url, { headers: { Accept: 'application/json' }, signal: AbortSignal.timeout(10000) });
+      const response = await fetch(url, { headers: { Accept: 'application/json' }, signal: AbortSignal.timeout(15000) });
       if (response.ok) {
         const data = await response.json();
         if (data.results && data.results.length > 0 && data.results[0].executionDate) {
@@ -648,7 +648,7 @@ async function checkSingletonIntegrity(address: string, chainId: number): Promis
   try {
     const checksummedAddress = getAddress(address);
     const url = `${baseUrl}/api/v1/safes/${checksummedAddress}/creation/`;
-    const response = await fetch(url, { headers: { Accept: 'application/json' }, signal: AbortSignal.timeout(10000) });
+    const response = await fetch(url, { headers: { Accept: 'application/json' }, signal: AbortSignal.timeout(15000) });
     if (!response.ok) return { id: 'singleton_integrity', title: 'Singleton Integrity', status: 'unavailable', message: 'Could not determine singleton.' };
 
     const data = await response.json();
@@ -685,7 +685,7 @@ async function checkMultiChainDeployment(address: string, currentChainId: number
 
   const otherChains = SUPPORTED_CHAINS.filter(c => c.id !== currentChainId);
   const results = await Promise.allSettled(otherChains.map(async (chain) => {
-    const client = createPublicClient({ chain: chain.viemChain, transport: http(chain.rpcUrl) });
+    const client = createPublicClient({ chain: chain.viemChain, transport: http(chain.rpcUrl, { timeout: 15000 }) });
     const code = await client.getBytecode({ address: address as `0x${string}` });
     if (code && code !== '0x') {
       try {
@@ -727,7 +727,7 @@ async function checkOwnerActivity(owners: string[], chainId: number): Promise<Se
         module: 'account', action: 'txlist', address: owner,
         startblock: '0', endblock: '99999999', page: '1', offset: '10', sort: 'desc',
       }) + apikeyParam;
-      const response = await fetch(url, { headers: { Accept: 'application/json' }, signal: AbortSignal.timeout(10000) });
+      const response = await fetch(url, { headers: { Accept: 'application/json' }, signal: AbortSignal.timeout(15000) });
       if (!response.ok) { errorOwners.push(owner); continue; }
 
       const data = await response.json();
@@ -774,7 +774,7 @@ async function fetchContractName(address: string, chainId: number, apiUrl: strin
     }
 
     try {
-      const response = await fetch(url, { signal: AbortSignal.timeout(20000) });
+      const response = await fetch(url, { signal: AbortSignal.timeout(15000) });
 
       if (!response.ok) {
         const retryable = response.status === 429 || response.status >= 500;
@@ -866,20 +866,35 @@ const isRecoveryModule = KNOWN_RECOVERY_MODULE_KEYWORDS.some(keyword => lowerNam
   return { id: 'emergency_recovery_mechanisms', title: 'Emergency Recovery Mechanisms', status: 'warning', message: `${recoveryModules.length} module${recoveryModules.length === 1 ? '' : 's'} detected. Review module configuration carefully. Could not determine recovery threshold.`, details: { modules: recoveryModules, moduleCount: recoveryModules.length, recoveryThreshold, normalThreshold: normalThresholdNum, thresholdComparison } };
 }
 
-// 15. Contract Signers (parallel bytecode checks)
+// 15. Contract Signers (parallel bytecode checks, with EIP-7702 detection)
 async function checkContractSigners(owners: string[], client: any): Promise<SecurityCheck> {
   // EIP-7702 delegation designator prefix — EOAs with active delegations return
   // bytecode starting with 0xef01 but are still EOAs, not smart contracts.
   const EIP7702_PREFIX = '0xef01';
-  const results = await Promise.allSettled(owners.map(async (owner) => {
+  interface CodeCheckResult { owner: string; isContract: boolean; isEip7702: boolean }
+  const results = await Promise.allSettled(owners.map(async (owner): Promise<CodeCheckResult> => {
     try {
       const code = await client.getBytecode({ address: owner as `0x${string}` });
-      return (code && code !== '0x' && code.length > 2 && !code.startsWith(EIP7702_PREFIX)) ? owner : null;
-    } catch { return null; }
+      if (code && code !== '0x' && code.length > 2) {
+        if (code.startsWith(EIP7702_PREFIX)) {
+          return { owner, isContract: false, isEip7702: true };
+        }
+        return { owner, isContract: true, isEip7702: false };
+      }
+      return { owner, isContract: false, isEip7702: false };
+    } catch { return { owner, isContract: false, isEip7702: false }; }
   }));
-  const contractSigners = results.filter((r): r is PromiseFulfilledResult<string> => r.status === 'fulfilled' && r.value !== null).map(r => r.value);
-  if (contractSigners.length === 0) return { id: 'contract_signers', title: 'Contract Signers', status: 'success', message: 'No multisig signers are contracts. All signers are externally owned accounts (EOAs).', details: { contractSigners, totalOwners: owners.length } };
-  return { id: 'contract_signers', title: 'Contract Signers', status: 'warning', message: `${contractSigners.length} signer${contractSigners.length === 1 ? '' : 's'} ${contractSigners.length === 1 ? 'is' : 'are'} contract${contractSigners.length === 1 ? '' : 's'}, not EOA${contractSigners.length === 1 ? '' : 's'}. Need to recursively check those signers.`, details: { contractSigners, totalOwners: owners.length } };
+  const contractSigners = results.filter((r): r is PromiseFulfilledResult<CodeCheckResult> => r.status === 'fulfilled' && r.value.isContract).map(r => r.value.owner);
+  const eip7702Signers = results.filter((r): r is PromiseFulfilledResult<CodeCheckResult> => r.status === 'fulfilled' && r.value.isEip7702).map(r => r.value.owner);
+
+  if (contractSigners.length === 0 && eip7702Signers.length === 0) {
+    return { id: 'contract_signers', title: 'Contract Signers', status: 'success', message: 'No multisig signers are contracts. All signers are externally owned accounts (EOAs).', details: { contractSigners, eip7702Signers, totalOwners: owners.length } };
+  }
+  if (contractSigners.length === 0 && eip7702Signers.length > 0) {
+    return { id: 'contract_signers', title: 'Contract Signers', status: 'success', message: `No signers are contracts, but ${eip7702Signers.length} signer${eip7702Signers.length === 1 ? ' has' : 's have'} an active EIP-7702 delegation (EOA with temporary contract code). These remain EOAs controlled by their private keys.`, details: { contractSigners, eip7702Signers, totalOwners: owners.length } };
+  }
+  const eip7702Note = eip7702Signers.length > 0 ? ` Additionally, ${eip7702Signers.length} signer${eip7702Signers.length === 1 ? ' has' : 's have'} an EIP-7702 delegation (EOA with temporary contract code).` : '';
+  return { id: 'contract_signers', title: 'Contract Signers', status: 'warning', message: `${contractSigners.length} signer${contractSigners.length === 1 ? 'is a contract' : 's are contracts'}, not EOA${contractSigners.length === 1 ? '' : 's'}. Need to recursively check those signers.${eip7702Note}`, details: { contractSigners, eip7702Signers, totalOwners: owners.length } };
 }
 
 // 16. Multi-Chain Signer Analysis (full implementation matching frontend)
@@ -893,7 +908,7 @@ async function checkMultiChainSigners(address: string, owners: string[], current
 
   const chainOwnerResults = await Promise.allSettled(deployedChains.map(async (chain) => {
     try {
-      const client = createPublicClient({ chain: chain.viemChain, transport: http(chain.rpcUrl) });
+const client = createPublicClient({ chain: chain.viemChain, transport: http(chain.rpcUrl, { timeout: 15000 }) });
       try {
         const chainOwners = await client.readContract({ address: address as `0x${string}`, abi: GNOSIS_SAFE_ABI, functionName: 'getOwners' }) as string[];
         return { chainName: chain.name, owners: chainOwners };

@@ -27,6 +27,7 @@ export const INFORMATIONAL_CHECKS = new Set([
   'Chain Configuration',
   'Transaction Guard',
   'Fallback Handler',
+  'Optional Modules',
   'Emergency Recovery Mechanisms',
 ]);
 
@@ -38,22 +39,16 @@ export const PENALTY_CONFIG: Record<string, PenaltyConfig> = {
     description: 'Number of signatures required to execute transactions',
   },
   'Signer Threshold Percentage': {
-    error: 18,
-    warning: 9,
+    error: 14,
+    warning: 7,
     description: 'Percentage of owners required to approve transactions',
   },
 
   // Important security features
   'Signing Speed Analysis': {
-    error: 16,
-    warning: 8,
+    error: 14,
+    warning: 7,
     description: 'Time between first and last signature (indicates potential centralization)',
-  },
-  // Informational checks (no score impact — displayed separately)
-  'Optional Modules': {
-    error: 12,
-    warning: 5,
-    description: 'Extensions that can execute transactions',
   },
   'Safe Version': {
     error: 10,
@@ -85,8 +80,8 @@ export const PENALTY_CONFIG: Record<string, PenaltyConfig> = {
 
   // Informational checks
   'Contract Signers': {
-    error: 2,
-    warning: 1,
+    error: 4,
+    warning: 2,
     description: 'Check if signers are smart contracts',
   },
   'Owner Activity Analysis': {
@@ -95,8 +90,8 @@ export const PENALTY_CONFIG: Record<string, PenaltyConfig> = {
     description: 'Transaction activity of owner addresses',
   },
   'Multi-Chain Signer Analysis': {
-    error: 2,
-    warning: 1,
+    error: 4,
+    warning: 2,
     description: 'Signer reuse across chain deployments',
   },
 };
