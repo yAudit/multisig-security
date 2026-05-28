@@ -596,7 +596,7 @@ async function checkLastTransactionDate(address: string, chainId: number, nonce:
   if (txServiceUrl) {
     try {
       const checksummedAddress = getAddress(address);
-      const url = `${txServiceUrl}/api/v1/safes/${checksummedAddress}/multisig-transactions/?limit=1&ordering=-nonce`;
+      const url = `${txServiceUrl}/api/v1/safes/${checksummedAddress}/multisig-transactions/?executed=true&limit=1&ordering=-nonce`;
       const response = await fetch(url, { headers: { Accept: 'application/json' }, signal: AbortSignal.timeout(10000) });
       if (response.ok) {
         const data = await response.json();

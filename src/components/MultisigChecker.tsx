@@ -647,7 +647,7 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
     if (chain.safeTransactionServiceUrl) {
       try {
         const checksummedAddr = getAddress(addr);
-        const url = `${chain.safeTransactionServiceUrl}/api/v1/safes/${checksummedAddr}/multisig-transactions/?limit=1&ordering=-nonce`;
+        const url = `${chain.safeTransactionServiceUrl}/api/v1/safes/${checksummedAddr}/multisig-transactions/?executed=true&limit=1&ordering=-nonce`;
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), 10000);
         try {
