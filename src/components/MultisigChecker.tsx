@@ -449,7 +449,7 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
             address: address as `0x${string}`,
             abi: GNOSIS_SAFE_ABI,
             functionName: 'getModulesPaginated',
-args: [SENTINEL_MODULES_ADDRESS, 10n],
+            args: [SENTINEL_MODULES_ADDRESS, 10n],
           },
         ];
 
@@ -825,7 +825,7 @@ args: [SENTINEL_MODULES_ADDRESS, 10n],
           if (retryCount < 3) {
             return await getContractName(address, chain, retryCount + 1);
           }
-          return null;
+          return address;
         }
         throw err;
       }
@@ -869,9 +869,8 @@ args: [SENTINEL_MODULES_ADDRESS, 10n],
       console.error(`Error fetching contract name for ${address}:`, error);
       // Retry on network errors (timeout is already handled above)
       if (retryCount < 2) {
-          // Retrying after error
-          return await getContractName(address, chain, retryCount + 1);
-        }
+        // Retrying after error
+        return await getContractName(address, chain, retryCount + 1);
       }
 
       // Failed to get contract name after retries

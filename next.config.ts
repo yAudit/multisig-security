@@ -1,5 +1,4 @@
 import type { NextConfig } from "next";
-import packageJson from "./package.json" assert { type: "json" };
 
 const nextConfig: NextConfig = {
   trailingSlash: true,
@@ -7,7 +6,7 @@ const nextConfig: NextConfig = {
     unoptimized: true
   },
   env: {
-    NEXT_PUBLIC_APP_VERSION: `v${packageJson.version}`,
+    NEXT_PUBLIC_APP_VERSION: 'v2.0.0',
   },
 };
 

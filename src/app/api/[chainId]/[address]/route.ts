@@ -225,7 +225,7 @@ export async function GET(
       });
       let modules: string[] = [];
       try {
-        const [moduleArray] = await executeWithBackup<[string[], string]>((client) => {
+        const [moduleArray] = await executeWithBackup((client) => {
           return client.readContract({ address: address as `0x${string}`, abi: GNOSIS_SAFE_ABI, functionName: 'getModulesPaginated', args: [SENTINEL_MODULES_ADDRESS, 10n] });
         });
         modules = moduleArray as string[];

@@ -25,7 +25,7 @@ export interface SecurityScoreResult {
   unavailableChecks: number;
 }
 
-export const INFORMATIONAL_CHECKS = new Set([
+export const INFORMATIONAL_CHECKS = new Set<string>([
   CHECK_TITLES.CHAIN_CONFIGURATION,
   CHECK_TITLES.TRANSACTION_GUARD,
   CHECK_TITLES.FALLBACK_HANDLER,
