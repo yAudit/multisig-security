@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useState, useCallback } from 'react';
-import { getAddress } from 'ethers';
+import { getAddress } from 'viem';
 import {
   Clock,
   AlertTriangle,
@@ -12,8 +12,9 @@ import {
   Loader2,
   Zap
 } from 'lucide-react';
-import { cn } from '@/lib/utils';
+import { cn, FETCH_TIMEOUT_MS } from '@/lib/utils';
 import { SAFE_TX_SERVICE_URLS } from '../constants/chains';
+import { SIGNING_SPEED_ERROR_SECONDS, SIGNING_SPEED_WARNING_SECONDS } from '@/lib/thresholds';
 
 interface Confirmation {
   owner: string;
@@ -101,7 +102,7 @@ function parseIsoTimestamp(tsString: string): Date | null {
 }
 
 function getSpeedClass(durationSeconds: number): { color: string; textColor: string } {
-  if (durationSeconds < 600) return { 
+  if (durationSeconds < SIGNING_SPEED_ERROR_SECONDS) return { 
     color: "bg-[var(--color-error-bg)] border-[var(--color-error)]/30 text-[var(--color-error)]", 
     textColor: "text-[var(--color-error)]" 
   };
@@ -109,7 +110,7 @@ function getSpeedClass(durationSeconds: number): { color: string; textColor: str
     color: "bg-[var(--color-warning-bg)] border-[var(--color-warning)]/30 text-[var(--color-warning)]", 
     textColor: "text-[var(--color-warning)]" 
   };
-  if (durationSeconds < 21600) return { 
+  if (durationSeconds < SIGNING_SPEED_WARNING_SECONDS) return { 
     color: "bg-[var(--color-warning-bg)] border-[var(--color-warning)]/30 text-[var(--color-warning)]", 
     textColor: "text-[var(--color-warning)]" 
   };
@@ -125,7 +126,7 @@ function getRiskAssessment(avgSeconds: number): {
   rating: string; 
   icon: React.ReactNode 
 } {
-  if (avgSeconds < 600) {
+  if (avgSeconds < SIGNING_SPEED_ERROR_SECONDS) {
     return {
       className: "high",
       text: "Fast Signing - Average signing time under 10 minutes suggests minimal transaction review",
@@ -141,7 +142,7 @@ function getRiskAssessment(avgSeconds: number): {
       icon: <Clock className="h-5 w-5" />
     };
   }
-  if (avgSeconds < 21600) {
+  if (avgSeconds < SIGNING_SPEED_WARNING_SECONDS) {
     return {
       className: "medium",
       text: "Moderate Signing - Transactions signed within 6 hours on average",
@@ -176,7 +177,7 @@ export async function fetchAndAnalyzeSafe(address: string, chainId: number): Pro
   url.searchParams.append('limit', '10');
   url.searchParams.append('ordering', '-executionDate');
 
-  const response = await fetch(url.toString(), { headers: { Accept: 'application/json' }, signal: AbortSignal.timeout(15000) });
+  const response = await fetch(url.toString(), { headers: { Accept: 'application/json' }, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
   if (!response.ok) {
     throw new Error(`Safe API error: ${response.status}`);
   }

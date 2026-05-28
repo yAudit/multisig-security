@@ -1,0 +1,17 @@
+export const SIGNING_SPEED_ERROR_SECONDS = 600;
+export const SIGNING_SPEED_WARNING_SECONDS = 21600;
+
+export const INACTIVITY_ERROR_DAYS = 90;
+export const INACTIVITY_WARNING_DAYS = 31;
+
+export const CONTRACT_AGE_ERROR_DAYS = 7;
+export const CONTRACT_AGE_WARNING_DAYS = 60;
+
+export const NONCE_ERROR_MAX = 3;
+export const NONCE_WARNING_MAX = 10;
+
+export const THRESHOLD_LOW_ABSOLUTE = 3;
+export const THRESHOLD_MAJORITY_PCT = 51;
+export const THRESHOLD_LOW_PCT = 34;
+
+export const SAFE_VERSION_CACHE_TTL_MS = 24 * 60 * 60 * 1000;

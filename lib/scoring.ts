@@ -1,3 +1,5 @@
+import { CHECK_TITLES } from './checkTitles';
+
 // Shared security scoring logic — single source of truth for both API and frontend.
 // Any change here automatically applies to both.
 
@@ -24,11 +26,11 @@ export interface SecurityScoreResult {
 }
 
 export const INFORMATIONAL_CHECKS = new Set([
-  'Chain Configuration',
-  'Transaction Guard',
-  'Fallback Handler',
-  'Optional Modules',
-  'Emergency Recovery Mechanisms',
+  CHECK_TITLES.CHAIN_CONFIGURATION,
+  CHECK_TITLES.TRANSACTION_GUARD,
+  CHECK_TITLES.FALLBACK_HANDLER,
+  CHECK_TITLES.OPTIONAL_MODULES,
+  CHECK_TITLES.EMERGENCY_RECOVERY,
 ]);
 
 export const PENALTY_CONFIG: Record<string, PenaltyConfig> = {

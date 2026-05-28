@@ -194,3 +194,15 @@ export const SENTINEL_MODULES_ADDRESS = '0x0000000000000000000000000000000000000
 // public getGuard() and getFallbackHandler() functions to save bytecode size.
 export const GUARD_STORAGE_SLOT = '0x4a204f620c8c5ccdca3fd54d003badd85ba500436a431f0cbda4f558c93c34c8';
 export const FALLBACK_HANDLER_STORAGE_SLOT = '0x6c9a6c4a39284e37ed1cf53d337577d14212a4870fb976a4366c693b939918d5';
+
+export const EIP7702_DELEGATION_PREFIX = '0xef01';
+
+export const SAFE_EXEC_TX_METHOD_ID = '0x6a761202';
+
+export const KNOWN_RECOVERY_MODULE_KEYWORDS = [
+  'social recovery',
+  'recovery',
+  'guardian',
+  'allowance',
+  'delay',
+];
