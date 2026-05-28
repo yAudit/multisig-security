@@ -131,6 +131,8 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
   // Reconcile frontend statuses with the API-authoritative statuses.
   // The API overrides the frontend unless the frontend already determined data was unavailable
   // (the API may default failed reads to "success" via zero-address fallbacks).
+  // The API also must NOT downgrade a frontend success/warning/error to "unavailable" —
+  // if the frontend got data but the API didn't, the frontend's result should be kept.
   React.useEffect(() => {
     const apiStatuses = apiStatusRef.current;
     if (Object.keys(apiStatuses).length === 0) return;
@@ -139,7 +141,7 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
       let needsUpdate = false;
       const newResults = prevResults.map(r => {
         const apiStatus = apiStatuses[r.title];
-        if (apiStatus && r.status !== 'loading' && r.status !== 'unavailable' && r.status !== apiStatus) {
+        if (apiStatus && r.status !== 'loading' && r.status !== 'unavailable' && apiStatus !== 'unavailable' && r.status !== apiStatus) {
           needsUpdate = true;
           return { ...r, status: apiStatus };
         }
@@ -1373,7 +1375,9 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
                     status: apiCheck.status as 'success' | 'warning' | 'error' | 'unavailable',
                     message: apiCheck.message,
                   };
-                } else if (currentResult.status !== 'unavailable') {
+                } else if (currentResult.status !== 'unavailable' && apiCheck.status !== 'unavailable') {
+                  // Only override status from API if the API actually got data;
+                  // never downgrade a frontend success/warning/error to API "unavailable"
                   newResults[index] = {
                     ...currentResult,
                     status: apiCheck.status as 'success' | 'warning' | 'error' | 'unavailable',
