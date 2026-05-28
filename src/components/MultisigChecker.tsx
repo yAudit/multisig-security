@@ -568,13 +568,22 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
     // 1. Try Safe Transaction Service first (free, no API key needed on most chains)
     if (chain.safeTransactionServiceUrl) {
       try {
-        const url = `${chain.safeTransactionServiceUrl}/api/v1/safes/${addr}/creation/`;
-        const response = await fetch(url, { headers: { Accept: 'application/json' } });
-        if (response.ok) {
-          const data = await response.json();
-          if (data.created) {
-            return new Date(data.created);
+        const checksummedAddr = getAddress(addr);
+        const url = `${chain.safeTransactionServiceUrl}/api/v1/safes/${checksummedAddr}/creation/`;
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 10000);
+        try {
+          const response = await fetch(url, { headers: { Accept: 'application/json' }, signal: controller.signal });
+          clearTimeout(timeoutId);
+          if (response.ok) {
+            const data = await response.json();
+            if (data.created) {
+              return new Date(data.created);
+            }
           }
+        } catch (fetchErr) {
+          clearTimeout(timeoutId);
+          throw fetchErr;
         }
       } catch (err) {
         console.error('Safe Transaction Service creation date fetch failed:', err);
@@ -635,14 +644,23 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
     // 1. Try Safe Transaction Service first (free, no API key needed on most chains)
     if (chain.safeTransactionServiceUrl) {
       try {
-        const url = `${chain.safeTransactionServiceUrl}/api/v1/safes/${addr}/multisig-transactions/?limit=1&ordering=-nonce`;
-        const response = await fetch(url, { headers: { Accept: 'application/json' } });
-        if (response.ok) {
-          const data = await response.json();
-          if (data.results && data.results.length > 0 && data.results[0].executionDate) {
-            return new Date(data.results[0].executionDate);
+        const checksummedAddr = getAddress(addr);
+        const url = `${chain.safeTransactionServiceUrl}/api/v1/safes/${checksummedAddr}/multisig-transactions/?limit=1&ordering=-nonce`;
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 10000);
+        try {
+          const response = await fetch(url, { headers: { Accept: 'application/json' }, signal: controller.signal });
+          clearTimeout(timeoutId);
+          if (response.ok) {
+            const data = await response.json();
+            if (data.results && data.results.length > 0 && data.results[0].executionDate) {
+              return new Date(data.results[0].executionDate);
+            }
+            // No transactions found in Safe — fall through to Etherscan to catch on-chain txs
           }
-          // No transactions found in Safe — fall through to Etherscan to catch on-chain txs
+        } catch (fetchErr) {
+          clearTimeout(timeoutId);
+          throw fetchErr;
         }
       } catch (err) {
         console.error('Safe Transaction Service last tx date fetch failed:', err);
@@ -1188,7 +1206,14 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
     try {
       const checksummedAddress = getAddress(address);
       const url = `${baseUrl}/api/v1/safes/${checksummedAddress}/creation/`;
-      const response = await fetch(url, { headers: { Accept: 'application/json' } });
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 10000);
+      let response;
+      try {
+        response = await fetch(url, { headers: { Accept: 'application/json' }, signal: controller.signal });
+      } finally {
+        clearTimeout(timeoutId);
+      }
 
       if (!response.ok) {
         return { masterCopy: null, singletonName: null, isOfficial: null, error: `API error: ${response.status}` };
@@ -1397,17 +1422,19 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
       const ownerCount = owners.length;
       const thresholdPct = ownerCount > 0 ? (thresholdNum / ownerCount) * 100 : 0;
       const thresholdStatus: 'error' | 'warning' | 'success' =
-        thresholdNum === 1 ? 'error'
+        thresholdNum === 0 || thresholdNum === 1 ? 'error'
         : thresholdNum <= 3 && thresholdPct < 51 ? 'warning'
         : 'success';
       updatedResults[1] = {
         title: 'Signer Threshold',
         status: thresholdStatus,
-        message: thresholdNum === 1
-          ? `Single signature requirement is insecure. Only ${thresholdNum} signature is required to execute transactions.`
-          : thresholdStatus === 'warning'
-            ? `Low signature threshold detected. ${thresholdNum} of ${ownerCount} signatures required to execute transactions.`
-            : `Good signature threshold. ${thresholdNum} of ${ownerCount} signatures required to execute transactions.`
+        message: thresholdNum === 0
+          ? `No signatures required — anyone can execute transactions. Threshold is set to 0.`
+          : thresholdNum === 1
+            ? `Single signature requirement is insecure. Only ${thresholdNum} signature is required to execute transactions.`
+            : thresholdStatus === 'warning'
+              ? `Low signature threshold detected. ${thresholdNum} of ${ownerCount} signatures required to execute transactions.`
+              : `Good signature threshold. ${thresholdNum} of ${ownerCount} signatures required to execute transactions.`
       };
       safeSetResults([...updatedResults]);
 

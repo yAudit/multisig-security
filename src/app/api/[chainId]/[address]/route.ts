@@ -540,8 +540,9 @@ async function checkContractCreationDate(address: string, chainId: number): Prom
   const txServiceUrl = SAFE_TX_SERVICE_URLS[chainId];
   if (txServiceUrl) {
     try {
-      const url = `${txServiceUrl}/api/v1/safes/${address}/creation/`;
-      const response = await fetch(url, { headers: { Accept: 'application/json' } });
+      const checksummedAddress = getAddress(address);
+      const url = `${txServiceUrl}/api/v1/safes/${checksummedAddress}/creation/`;
+      const response = await fetch(url, { headers: { Accept: 'application/json' }, signal: AbortSignal.timeout(10000) });
       if (response.ok) {
         const data = await response.json();
         if (data.created) {
@@ -594,8 +595,9 @@ async function checkLastTransactionDate(address: string, chainId: number, nonce:
   const txServiceUrl = SAFE_TX_SERVICE_URLS[chainId];
   if (txServiceUrl) {
     try {
-      const url = `${txServiceUrl}/api/v1/safes/${address}/multisig-transactions/?limit=1&ordering=-nonce`;
-      const response = await fetch(url, { headers: { Accept: 'application/json' } });
+      const checksummedAddress = getAddress(address);
+      const url = `${txServiceUrl}/api/v1/safes/${checksummedAddress}/multisig-transactions/?limit=1&ordering=-nonce`;
+      const response = await fetch(url, { headers: { Accept: 'application/json' }, signal: AbortSignal.timeout(10000) });
       if (response.ok) {
         const data = await response.json();
         if (data.results && data.results.length > 0 && data.results[0].executionDate) {
@@ -646,7 +648,7 @@ async function checkSingletonIntegrity(address: string, chainId: number): Promis
   try {
     const checksummedAddress = getAddress(address);
     const url = `${baseUrl}/api/v1/safes/${checksummedAddress}/creation/`;
-    const response = await fetch(url, { headers: { Accept: 'application/json' } });
+    const response = await fetch(url, { headers: { Accept: 'application/json' }, signal: AbortSignal.timeout(10000) });
     if (!response.ok) return { id: 'singleton_integrity', title: 'Singleton Integrity', status: 'unavailable', message: 'Could not determine singleton.' };
 
     const data = await response.json();

@@ -176,7 +176,7 @@ export async function fetchAndAnalyzeSafe(address: string, chainId: number): Pro
   url.searchParams.append('limit', '10');
   url.searchParams.append('ordering', '-executionDate');
 
-  const response = await fetch(url.toString(), { headers: { Accept: 'application/json' } });
+  const response = await fetch(url.toString(), { headers: { Accept: 'application/json' }, signal: AbortSignal.timeout(10000) });
   if (!response.ok) {
     throw new Error(`Safe API error: ${response.status}`);
   }
