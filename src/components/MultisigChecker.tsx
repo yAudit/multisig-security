@@ -4,12 +4,12 @@ import React, { useState, useMemo, useCallback, useEffect } from 'react';
 import { createPublicClient, http, isAddress, getAddress } from 'viem';
 import { multicall } from 'viem/actions';
 import Safe from '@safe-global/protocol-kit';
-import { GNOSIS_SAFE_ABI, OFFICIAL_SAFE_FALLBACK_HANDLERS, OFFICIAL_SAFE_PROXY_FACTORIES, SAFE_VERSIONS_WITH_KNOWN_FACTORIES, SENTINEL_MODULES_ADDRESS } from '../constants/contracts';
+import { GNOSIS_SAFE_ABI, OFFICIAL_SAFE_FALLBACK_HANDLERS, OFFICIAL_SAFE_PROXY_FACTORIES, SAFE_VERSIONS_WITH_KNOWN_FACTORIES, SENTINEL_MODULES_ADDRESS, GUARD_STORAGE_SLOT, FALLBACK_HANDLER_STORAGE_SLOT } from '../constants/contracts';
 import { SUPPORTED_CHAINS, DEFAULT_CHAIN, CHAIN_ID_MAP, CHAIN_EXAMPLES, SAFE_TX_SERVICE_URLS, SAFE_GITHUB_RELEASES_URL, type ChainConfig, isBlockscout, buildExplorerApiUrl } from '../constants/chains';
 import { getTooltipInfo } from '../constants/tooltips';
 import { Search, Share2, Info, CheckCircle, AlertTriangle, XCircle, Loader2, ChevronDown, ShieldAlert, Shield, HelpCircle } from 'lucide-react';
 import { cn, truncateHash } from '@/lib/utils';
-import { calculateSecurityScore, PENALTY_CONFIG, DEFAULT_PENALTY } from '@/lib/scoring';
+import { calculateSecurityScore, PENALTY_CONFIG, DEFAULT_PENALTY, INFORMATIONAL_CHECKS } from '@/lib/scoring';
 import { SpeedTest, fetchAndAnalyzeSafe } from './SpeedTest';
 import type { AnalysisResult } from './SpeedTest';
 
@@ -113,7 +113,7 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
   const [error, setError] = useState('');
   const [results, setResults] = useState<SecurityCheck[]>([]);
   const [selectedChain, setSelectedChain] = useState<ChainConfig>(initialChain);
-  const [openTooltip, setOpenTooltip] = useState<number | null>(null);
+  const [openTooltip, setOpenTooltip] = useState<number | string | null>(null);
   const [showShareToast, setShowShareToast] = useState(false);
   const [isToastFading, setIsToastFading] = useState(false);
   const [chainChanged, setChainChanged] = useState(false);
@@ -374,14 +374,20 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
 
     let guard: string | { error: string } | null = null;
     try {
-      const guardAddress = await executeWithBackup(chain, async (client) => {
-        return await client.readContract({
+      const guardSlot = await executeWithBackup(chain, async (client) => {
+        return await client.getStorageAt({
           address: address as `0x${string}`,
-          abi: GNOSIS_SAFE_ABI,
-          functionName: 'getGuard',
+          slot: GUARD_STORAGE_SLOT as `0x${string}`,
         });
       });
-      guard = guardAddress as string;
+      const guardAddress = guardSlot && guardSlot !== '0x0000000000000000000000000000000000000000000000000000000000000000'
+        ? `0x${guardSlot.slice(26)}` as string
+        : '0x0000000000000000000000000000000000000000';
+      guard = guardAddress;
+      const [, minor] = (version as string).split('.').map(Number);
+      if (guardAddress === '0x0000000000000000000000000000000000000000' && minor < 3) {
+        guard = { error: 'UNSUPPORTED_VERSION' };
+      }
     } catch {
       const [, minor] = (version as string).split('.').map(Number);
       guard = minor < 3 ? { error: 'UNSUPPORTED_VERSION' } : null;
@@ -389,14 +395,15 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
 
     let fallbackHandler: string | null = null;
     try {
-      const handlerAddress = await executeWithBackup(chain, async (client) => {
-        return await client.readContract({
+      const fallbackSlot = await executeWithBackup(chain, async (client) => {
+        return await client.getStorageAt({
           address: address as `0x${string}`,
-          abi: GNOSIS_SAFE_ABI,
-          functionName: 'getFallbackHandler',
+          slot: FALLBACK_HANDLER_STORAGE_SLOT as `0x${string}`,
         });
       });
-      fallbackHandler = handlerAddress as string;
+      if (fallbackSlot && fallbackSlot !== '0x0000000000000000000000000000000000000000000000000000000000000000') {
+        fallbackHandler = `0x${fallbackSlot.slice(26)}` as string;
+      }
     } catch {
       fallbackHandler = null;
     }
@@ -419,7 +426,7 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
 
   const batchGnosisSafeCalls = async (address: string, chain: ChainConfig) => {
     try {
-      const results = await executeWithBackup(chain, async (client) => {
+      const [results, guardSlotValue, fallbackSlotValue] = await executeWithBackup(chain, async (client) => {
         const calls = [
           {
             address: address as `0x${string}`,
@@ -447,26 +454,27 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
             functionName: 'getModulesPaginated',
             args: [SENTINEL_MODULES_ADDRESS, 10],
           },
-          {
-            address: address as `0x${string}`,
-            abi: GNOSIS_SAFE_ABI,
-            functionName: 'getGuard',
-          },
-          {
-            address: address as `0x${string}`,
-            abi: GNOSIS_SAFE_ABI,
-            functionName: 'getFallbackHandler',
-          },
         ];
 
-        return await multicall(client, {
+        const multicallResults = await multicall(client, {
           contracts: calls,
           allowFailure: true,
         });
+
+        const guardSlot = await client.getStorageAt({
+          address: address as `0x${string}`,
+          slot: GUARD_STORAGE_SLOT as `0x${string}`,
+        });
+        const fallbackSlot = await client.getStorageAt({
+          address: address as `0x${string}`,
+          slot: FALLBACK_HANDLER_STORAGE_SLOT as `0x${string}`,
+        });
+
+        return [multicallResults, guardSlot, fallbackSlot] as const;
       });
 
       // Process results and handle potential errors
-      const [versionResult, thresholdResult, ownersResult, nonceResult, modulesResult, guardResult, fallbackHandlerResult] = results;
+      const [versionResult, thresholdResult, ownersResult, nonceResult, modulesResult] = results;
 
       if (
         versionResult.status === 'failure' ||
@@ -489,19 +497,20 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
         modules = moduleArray;
       }
 
-      // Handle guard result - getGuard doesn't exist on Safe versions before 1.3.0
-      let guard: string | { error: string } | null = null;
-      if (guardResult.status === 'success') {
-        guard = guardResult.result as string;
-      } else {
-        const [, minor] = version.split('.').map(Number);
-        guard = minor < 3 ? { error: 'UNSUPPORTED_VERSION' } : null;
+      // Read guard from storage slot (Safe v1.4.1 removed public getGuard())
+      const guardAddress = guardSlotValue && guardSlotValue !== '0x0000000000000000000000000000000000000000000000000000000000000000'
+        ? `0x${guardSlotValue.slice(26)}` as string
+        : '0x0000000000000000000000000000000000000000';
+      let guard: string | { error: string } | null = guardAddress;
+      const [, minor] = version.split('.').map(Number);
+      if (guardAddress === '0x0000000000000000000000000000000000000000' && minor < 3) {
+        guard = { error: 'UNSUPPORTED_VERSION' };
       }
 
-      // Handle fallback handler result
+      // Read fallback handler from storage slot (Safe v1.4.1 has no getFallbackHandler())
       let fallbackHandler: string | null = null;
-      if (fallbackHandlerResult.status === 'success') {
-        fallbackHandler = fallbackHandlerResult.result as string;
+      if (fallbackSlotValue && fallbackSlotValue !== '0x0000000000000000000000000000000000000000000000000000000000000000') {
+        fallbackHandler = `0x${fallbackSlotValue.slice(26)}` as string;
       }
 
       // Validate version format
@@ -1212,13 +1221,13 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
         { title: 'Last Transaction Date', status: 'loading', message: 'Loading last transaction date...' },
         { title: 'Safe Factory', status: 'loading', message: 'Checking deployment factory...' },
         { title: 'Optional Modules', status: 'loading', message: 'Loading module information...' },
+        { title: 'Owner Activity Analysis', status: 'loading', message: 'Analyzing owner transaction activity...' },
+        { title: 'Contract Signers', status: 'loading', message: 'Checking if signers are contracts...' },
+        { title: 'Multi-Chain Signer Analysis', status: 'loading', message: 'Multi-chain deployment not detected' },
         { title: 'Transaction Guard', status: 'loading', message: 'Checking transaction guard configuration...' },
         { title: 'Fallback Handler', status: 'loading', message: 'Checking fallback handler configuration...' },
-        { title: 'Chain Configuration', status: 'loading', message: 'Checking multi-chain deployment and replay protection...' },
-        { title: 'Owner Activity Analysis', status: 'loading', message: 'Analyzing owner transaction activity...' },
+        { title: 'Chain Configuration', status: 'loading', message: 'Checking multi-chain deployment...' },
         { title: 'Emergency Recovery Mechanisms', status: 'loading', message: 'Checking recovery module configuration...' },
-        { title: 'Contract Signers', status: 'loading', message: 'Checking if signers are contracts...' },
-        { title: 'Multi-Chain Signer Analysis', status: 'loading', message: 'Multi-chain deployment not detected' }
       ];
 
       setResults(initialResults);
@@ -1257,13 +1266,13 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
               'Last Transaction Date': 6,
               'Safe Factory': 7,
               'Optional Modules': 8,
-              'Transaction Guard': 9,
-              'Fallback Handler': 10,
-              'Chain Configuration': 11,
-              'Owner Activity Analysis': 12,
-              'Emergency Recovery Mechanisms': 13,
-              'Contract Signers': 14,
-              'Multi-Chain Signer Analysis': 15,
+              'Owner Activity Analysis': 9,
+              'Contract Signers': 10,
+              'Multi-Chain Signer Analysis': 11,
+              'Transaction Guard': 12,
+              'Fallback Handler': 13,
+              'Chain Configuration': 14,
+              'Emergency Recovery Mechanisms': 15,
             };
 
             for (const [title, index] of Object.entries(titleToIndex)) {
@@ -1581,21 +1590,21 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
 
           if (errorOwners.length === owners.length) {
             // All owners had errors, likely due to missing API key or unsupported chain
-            newResults[12] = {
+            newResults[9] = {
               title: 'Owner Activity Analysis',
               status: 'unavailable',
               message: 'Could not analyze owner activity (Explorer API key required)'
             };
           } else if (activeOwners.length === 0) {
             // All owners are inactive (good)
-            newResults[12] = {
+            newResults[9] = {
               title: 'Owner Activity Analysis',
               status: 'success',
               message: `All ${inactiveOwners.length} owner${inactiveOwners.length === 1 ? '' : 's'} may be used exclusively for multisig signing (no recent non-multisig transactions).`
             };
           } else {
             // Some owners are active (not ideal)
-            newResults[12] = {
+            newResults[9] = {
               title: 'Owner Activity Analysis',
               status: 'warning',
               message: (
@@ -1636,27 +1645,27 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
           const newResults = [...currentResults];
 
           if (!guardResult) {
-            newResults[9] = {
+            newResults[12] = {
               title: 'Transaction Guard',
               status: 'unavailable',
               message: 'Could not check transaction guard status'
             };
           } else if (typeof guardResult === 'object' && 'error' in guardResult) {
-            newResults[9] = {
+            newResults[12] = {
               title: 'Transaction Guard',
               status: 'unavailable',
               message: 'Could not check transaction guard status (Safe version too old for guard support)'
             };
           } else if (guardResult === '0x0000000000000000000000000000000000000000' || guardResult === '') {
             // No guard enabled (good)
-            newResults[9] = {
+            newResults[12] = {
               title: 'Transaction Guard',
               status: 'success',
               message: 'No transaction guard enabled. Uses standard Safe transaction execution.'
             };
           } else {
             // Guard enabled (warning - requires review)
-            newResults[9] = {
+            newResults[12] = {
               title: 'Transaction Guard',
               status: 'warning',
               message: (
@@ -1690,14 +1699,14 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
           const newResults = [...currentResults];
 
           if (!fallbackHandlerResult) {
-            newResults[10] = {
+            newResults[13] = {
               title: 'Fallback Handler',
               status: 'unavailable',
               message: 'Could not check fallback handler status'
             };
           } else if (fallbackHandlerResult === '0x0000000000000000000000000000000000000000' || fallbackHandlerResult === '') {
             // No fallback handler enabled (good)
-            newResults[10] = {
+            newResults[13] = {
               title: 'Fallback Handler',
               status: 'success',
               message: 'No fallback handler enabled. Uses standard Safe functionality only.'
@@ -1708,7 +1717,7 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
 
             if (handlerName) {
               // Known official fallback handler (good)
-              newResults[10] = {
+              newResults[13] = {
                 title: 'Fallback Handler',
                 status: 'success',
                 message: (
@@ -1732,7 +1741,7 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
               };
             } else {
               // Unknown fallback handler (warning - requires review)
-              newResults[10] = {
+              newResults[13] = {
                 title: 'Fallback Handler',
                 status: 'warning',
                 message: (
@@ -1768,34 +1777,34 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
 
           if (totalDeployments === 0) {
             // Should not happen as we already verified the contract exists
-            newResults[11] = {
+            newResults[14] = {
               title: 'Chain Configuration',
               status: 'unavailable',
               message: 'Could not verify Safe deployment on any chain'
             };
           } else if (totalDeployments === 1) {
             // Safe only deployed on one chain (good)
-            newResults[11] = {
+            newResults[14] = {
               title: 'Chain Configuration',
               status: 'success',
               message: `Safe is deployed only on ${selectedChain.name}. No multi-chain deployment detected.`
             };
 
             // Skip Multi-Chain Signer Analysis for single-chain deployments
-            newResults[15] = {
+            newResults[11] = {
               title: 'Multi-Chain Signer Analysis',
               status: 'success',
               message: 'Not applicable - Safe is only deployed on one chain.'
             };
           } else {
-            // Safe deployed on multiple chains (warning - replay risk)
+            // Safe deployed on multiple chains (informational)
             const chainNames = deployedChains.map(chain => chain.name).join(', ');
-            newResults[11] = {
+            newResults[14] = {
               title: 'Chain Configuration',
-              status: 'warning',
+              status: 'success',
               message: (
                 <div>
-                  <div>⚠️ Multi-chain deployment detected. Not an issue on its own, but this Safe exists on {totalDeployments} chains with the same address.</div>
+                  <div>Multi-chain deployment detected. This Safe exists on {totalDeployments} chains with the same address.</div>
                   <div className="mt-1 sm:mt-2">
                     <div className="font-medium text-sm sm:text-base">Deployed on:</div>
                     <div className="ml-1 sm:ml-2 text-sm sm:text-base">{chainNames}</div>
@@ -1805,7 +1814,7 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
             };
 
             // Trigger multi-chain signer reuse analysis
-            newResults[15] = {
+            newResults[11] = {
               title: 'Multi-Chain Signer Analysis',
               status: 'loading',
               message: 'Analyzing signer reuse across chains...'
@@ -1818,14 +1827,14 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
 
                 if (reusedSigners.length === 0) {
                   // No signer reuse detected (good)
-                  updatedResults[15] = {
+                  updatedResults[11] = {
                     title: 'Multi-Chain Signer Analysis',
                     status: 'success',
                     message: '✅ No signer address appears on different chains. Each chain has unique signers.'
                   };
                 } else {
                   // Signer reuse detected (warning)
-                  updatedResults[15] = {
+                  updatedResults[11] = {
                     title: 'Multi-Chain Signer Analysis',
                     status: 'warning',
                     message: (
@@ -1860,7 +1869,7 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
               console.error('Multi-chain signer analysis failed:', error);
               setResults(currentResults => {
                 const updatedResults = [...currentResults];
-                updatedResults[15] = {
+                updatedResults[11] = {
                   title: 'Multi-Chain Signer Analysis',
                   status: 'unavailable',
                   message: 'Could not analyze signer reuse across chains'
@@ -1876,7 +1885,7 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
         console.error('Error checking chain configuration:', error);
         setResults(currentResults => {
           const newResults = [...currentResults];
-          newResults[11] = {
+          newResults[14] = {
             title: 'Chain Configuration',
             status: 'unavailable',
             message: 'Could not complete multi-chain deployment check'
@@ -1941,7 +1950,7 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
 
           if (!hasRecoveryModule) {
             // No recovery module (neutral - not necessarily bad)
-            newResults[13] = {
+            newResults[15] = {
               title: 'Emergency Recovery Mechanisms',
               status: 'warning',
               message: 'No recovery module detected. Consider implementing social recovery or guardian mechanisms for emergency access.'
@@ -1950,7 +1959,7 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
             // Recovery module exists - assess configuration
             if (thresholdComparison === 'lower') {
               // Recovery threshold is lower than normal - potential security risk
-              newResults[13] = {
+              newResults[15] = {
                 title: 'Emergency Recovery Mechanisms',
                 status: 'error',
                 message: (
@@ -1989,7 +1998,7 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
               };
             } else if (thresholdComparison === 'equal') {
               // Recovery threshold equals normal - reasonable
-              newResults[13] = {
+              newResults[15] = {
                 title: 'Emergency Recovery Mechanisms',
                 status: 'success',
                 message: (
@@ -2019,7 +2028,7 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
               };
             } else if (thresholdComparison === 'higher') {
               // Recovery threshold is higher - very secure
-              newResults[13] = {
+              newResults[15] = {
                 title: 'Emergency Recovery Mechanisms',
                 status: 'success',
                 message: (
@@ -2050,7 +2059,7 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
               };
             } else {
               // Unknown threshold comparison
-              newResults[13] = {
+              newResults[15] = {
                 title: 'Emergency Recovery Mechanisms',
                 status: 'warning',
                 message: (
@@ -2091,7 +2100,7 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
         console.error('Error checking recovery mechanisms:', error);
         setResults(currentResults => {
           const newResults = [...currentResults];
-          newResults[13] = {
+          newResults[15] = {
             title: 'Emergency Recovery Mechanisms',
             status: 'unavailable',
             message: 'Could not check recovery mechanisms'
@@ -2107,7 +2116,7 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
 
           if (contractSigners.length === 0) {
             // All signers are EOAs (good)
-            newResults[14] = {
+            newResults[10] = {
               title: 'Contract Signers',
               status: 'success',
               message: 'No multisig signers are contracts. All signers are externally owned accounts (EOAs).'
@@ -2118,7 +2127,7 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
               ? contractSigners.slice(0, 3).join(', ') + ` and ${contractSigners.length - 3} more`
               : contractSigners.join(', ');
 
-            newResults[14] = {
+            newResults[10] = {
               title: 'Contract Signers',
               status: 'warning',
               message: `${contractSigners.length} signer${contractSigners.length === 1 ? '' : 's'} ${contractSigners.length === 1 ? 'is a contract' : 'are contracts'}, not EOA${contractSigners.length === 1 ? '' : 's'}. Need to recursively check those signers. Contract signers: ${contractList}`
@@ -2538,11 +2547,6 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
                             <div key={idx} className="flex items-center justify-between text-sm">
                               <div className="flex items-center gap-2">
                                 <span className="text-[var(--color-text-secondary)]">{penalty.title}</span>
-                                {penalty.isCritical && (
-                                  <span className="rounded bg-[var(--color-error)]/10 px-1.5 py-0.5 text-xs font-medium text-[var(--color-error)]">
-                                    Critical
-                                  </span>
-                                )}
                               </div>
                               <span className="font-medium text-[var(--color-error)]">-{penalty.points}</span>
                             </div>
@@ -2562,21 +2566,33 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
                           
                           {/* Legend */}
                           <div className="mt-3 rounded-lg bg-[var(--color-surface-secondary)] p-3 text-xs text-[var(--color-text-secondary)]">
-                            <p className="mb-1 font-medium text-[var(--color-text-primary)]">How scoring works:</p>
-                            <ul className="space-y-1">
-                              <li className="flex items-center gap-1.5">
-                                <ShieldAlert className="h-3 w-3 text-[var(--color-error)]" />
-                                <span><strong>Critical checks</strong> (Signer Threshold, Threshold Percentage): Errors cost 18-20 points</span>
-                              </li>
-                              <li className="flex items-center gap-1.5">
-                                <Shield className="h-3 w-3 text-[var(--color-warning)]" />
-                                <span><strong>Standard checks</strong>: Errors cost 8-15 points</span>
-                              </li>
-                              <li className="flex items-center gap-1.5">
-                                <span className="rounded-full bg-[var(--color-error)]/10 px-1.5 py-0 text-[10px] font-medium text-[var(--color-error)]">x2</span>
-                                <span>Multiple critical issues incur additional penalties</span>
-                              </li>
-                            </ul>
+                            <details>
+                              <summary className="cursor-pointer font-medium text-[var(--color-text-primary)] select-none">
+                                How scoring works
+                                <ChevronDown className="ml-1 inline h-3 w-3 transition-transform group-open:rotate-180" />
+                              </summary>
+                              <p className="mt-1 mb-2">Check penalties range from 1-20 points depending on severity.</p>
+                              <table className="w-full border-collapse text-xs">
+                                <thead>
+                                  <tr className="border-b border-[var(--color-border)]">
+                                    <th className="py-1 pr-2 text-left font-medium text-[var(--color-text-primary)]">Check</th>
+                                    <th className="py-1 px-2 text-right font-medium text-[var(--color-warning)]">Warning</th>
+                                    <th className="py-1 pl-2 text-right font-medium text-[var(--color-error)]">Error</th>
+                                  </tr>
+                                </thead>
+                                <tbody>
+                                  {Object.entries(PENALTY_CONFIG)
+                                    .sort(([, a], [, b]) => b.error - a.error)
+                                    .map(([title, config]) => (
+                                      <tr key={title} className="border-b border-[var(--color-border)]/50 last:border-0">
+                                        <td className="py-1 pr-2">{title}</td>
+                                        <td className="py-1 px-2 text-right">-{config.warning}</td>
+                                        <td className="py-1 pl-2 text-right">-{config.error}</td>
+                                      </tr>
+                                    ))}
+                                </tbody>
+                              </table>
+                            </details>
                           </div>
                         </div>
                       </details>
@@ -2587,10 +2603,10 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
             </div>
           )}
 
-          {/* Results List */}
+          {/* Scored Checks */}
           <div className="space-y-3">
             {results
-            .filter(result => result && result.status && result.title)
+            .filter(result => result && result.status && result.title && !INFORMATIONAL_CHECKS.has(result.title))
             .map((result, index) => {
 
               // Special rendering for Signing Speed Analysis - it renders its own container
@@ -2684,7 +2700,6 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
                     {result.status !== 'success' && result.status !== 'loading' && result.status !== 'unavailable' && (
                       <div className="mt-1.5 text-xs text-[var(--color-text-tertiary)]">
                         Score impact: -{result.status === 'error' ? penaltyConfig.error : penaltyConfig.warning} points
-                        {penaltyConfig.isCritical && ' (Critical)'}
                       </div>
                     )}
                     
@@ -2733,6 +2748,105 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
               </div>
             );
           })}
+
+          {/* Informational Checks */}
+          {results.some(r => r && r.title && INFORMATIONAL_CHECKS.has(r.title) && r.status && r.status !== 'loading') && (
+            <div className="mt-6 pt-6 border-t border-[var(--color-border)]">
+              <h3 className="text-sm font-semibold text-[var(--color-text-tertiary)] uppercase tracking-wider mb-3">Informational</h3>
+              <div className="space-y-3">
+                {results
+                  .filter(result => result && result.status && result.title && INFORMATIONAL_CHECKS.has(result.title))
+                  .map((result, index) => {
+
+              const tooltipInfo = getTooltipInfo(result.title);
+              const isTooltipOpen = openTooltip === `info-${index}`;
+
+              return (
+                <div
+                  key={`info-${index}`}
+                  className={cn(
+                    "rounded-lg border p-4 relative",
+                    result.status === 'success' && "bg-[var(--color-surface-secondary)] border-[var(--color-border)]",
+                    result.status === 'warning' && "bg-[var(--color-warning-bg)] border-[var(--color-warning)]/30",
+                    result.status === 'error' && "bg-[var(--color-error-bg)] border-[var(--color-error)]/30",
+                    result.status === 'unavailable' && "bg-[var(--color-surface-secondary)] border-[var(--color-border)]"
+                  )}
+                >
+                  <div className="flex items-start gap-4">
+                    <div className="flex items-center justify-center w-6 h-6 shrink-0">
+                      {result.status === 'success' && <CheckCircle className="h-5 w-5 text-[var(--color-text-tertiary)]" />}
+                      {result.status === 'warning' && <AlertTriangle className="h-5 w-5 text-[var(--color-warning)]" />}
+                      {result.status === 'error' && <XCircle className="h-5 w-5 text-[var(--color-error)]" />}
+                      {result.status === 'unavailable' && <HelpCircle className="h-5 w-5 text-[var(--color-text-tertiary)]" />}
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <h3 className={cn(
+                          "font-semibold",
+                          result.status === 'success' && "text-[var(--color-text-secondary)]",
+                          result.status === 'warning' && "text-[var(--color-warning)]",
+                          result.status === 'error' && "text-[var(--color-error)]",
+                          result.status === 'unavailable' && "text-[var(--color-text-tertiary)]"
+                        )}>{result.title}</h3>
+                        <span className="text-xs text-[var(--color-text-tertiary)] bg-[var(--color-surface-secondary)] px-1.5 py-0.5 rounded">Informational</span>
+                        
+                        <button
+                          onClick={() => setOpenTooltip(isTooltipOpen ? null : `info-${index}`)}
+                          className="focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]/20 rounded-full p-1 transition-colors text-[var(--color-text-tertiary)]/70 hover:text-[var(--color-text-tertiary)]"
+                          aria-label="Show information"
+                        >
+                          <Info className="h-4 w-4" />
+                        </button>
+                      </div>
+                      
+                      <div className="mt-1 text-sm text-[var(--color-text-primary)]">{result.message}</div>
+
+                      {isTooltipOpen && (
+                        <div className="mt-4 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-secondary)] p-4">
+                          <div className="space-y-3">
+                            <div>
+                              <h4 className="font-semibold text-[var(--color-text-primary)] mb-1">About this check:</h4>
+                              <p className="text-sm text-[var(--color-text-secondary)]">{tooltipInfo.description}</p>
+                            </div>
+
+                            {tooltipInfo.thresholds.length > 0 && (
+                              <div>
+                                <h4 className="font-semibold text-[var(--color-text-primary)] mb-2">Status Thresholds:</h4>
+                                <div className="space-y-1">
+                                  {tooltipInfo.thresholds.map((threshold, idx) => (
+                                    <div key={idx} className="text-sm text-[var(--color-text-secondary)]">
+                                      <span className="font-medium">{threshold.status}:</span>
+                                      <span className="ml-1">{threshold.condition}</span>
+                                    </div>
+                                  ))}
+                                </div>
+                              </div>
+                            )}
+
+                            <div className="pt-2 border-t border-[var(--color-border)]">
+                              <a
+                                href={tooltipInfo.learnMoreUrl}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="text-sm text-[var(--color-primary)] hover:underline font-medium inline-flex items-center gap-1"
+                              >
+                                Learn more
+                                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+                                </svg>
+                              </a>
+                            </div>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+              </div>
+            </div>
+          )}
         </div>
         </div>
       )}

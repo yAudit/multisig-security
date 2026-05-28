@@ -4,7 +4,6 @@
 export interface PenaltyConfig {
   error: number;
   warning: number;
-  isCritical: boolean;
   description: string;
 }
 
@@ -18,115 +17,86 @@ export interface SecurityScoreResult {
   position: number;
   rating: 'High Risk' | 'Medium Risk' | 'Low Risk';
   description: string;
-  penalties: { title: string; points: number; isCritical: boolean }[];
-  criticalCount: number;
+  penalties: { title: string; points: number }[];
   completedChecks: number;
   totalChecks: number;
   unavailableChecks: number;
 }
 
+export const INFORMATIONAL_CHECKS = new Set([
+  'Chain Configuration',
+  'Transaction Guard',
+  'Fallback Handler',
+  'Emergency Recovery Mechanisms',
+]);
+
 export const PENALTY_CONFIG: Record<string, PenaltyConfig> = {
-  // CRITICAL: Core security controls
+  // Core security controls
   'Signer Threshold': {
     error: 20,
     warning: 10,
-    isCritical: true,
     description: 'Number of signatures required to execute transactions',
   },
   'Signer Threshold Percentage': {
     error: 18,
     warning: 9,
-    isCritical: true,
     description: 'Percentage of owners required to approve transactions',
   },
 
-  // HIGH: Important security features
+  // Important security features
   'Signing Speed Analysis': {
     error: 16,
     warning: 8,
-    isCritical: false,
     description: 'Time between first and last signature (indicates potential centralization)',
   },
-  'Fallback Handler': {
-    error: 14,
-    warning: 6,
-    isCritical: false,
-    description: 'Handles token callbacks and fallback operations',
-  },
+  // Informational checks (no score impact — displayed separately)
   'Optional Modules': {
     error: 12,
     warning: 5,
-    isCritical: false,
     description: 'Extensions that can execute transactions',
   },
   'Safe Version': {
     error: 10,
     warning: 4,
-    isCritical: false,
     description: 'Safe singleton contract version',
   },
   'Safe Factory': {
     error: 10,
     warning: 4,
-    isCritical: false,
     description: 'Checks if Safe was deployed by an official proxy factory',
   },
 
-  // STANDARD: Other checks
+  // Other checks
   'Multisig Nonce': {
     error: 6,
     warning: 3,
-    isCritical: false,
     description: 'Total number of transactions executed by the multisig',
   },
   'Contract Creation Date': {
     error: 4,
     warning: 2,
-    isCritical: false,
     description: 'Age of the multisig contract deployment',
   },
   'Last Transaction Date': {
     error: 4,
     warning: 2,
-    isCritical: false,
     description: 'Time since last transaction execution',
   },
 
-  // LOW IMPACT: Informational checks
-  'Emergency Recovery Mechanisms': {
-    error: 2,
-    warning: 1,
-    isCritical: false,
-    description: 'Recovery modules for emergency access',
-  },
-  'Transaction Guard': {
-    error: 2,
-    warning: 1,
-    isCritical: false,
-    description: 'Transaction guard for additional validation',
-  },
+  // Informational checks
   'Contract Signers': {
     error: 2,
     warning: 1,
-    isCritical: false,
     description: 'Check if signers are smart contracts',
-  },
-  'Chain Configuration': {
-    error: 2,
-    warning: 1,
-    isCritical: false,
-    description: 'Multi-chain deployment check',
   },
   'Owner Activity Analysis': {
     error: 2,
     warning: 1,
-    isCritical: false,
     description: 'Transaction activity of owner addresses',
   },
   'Multi-Chain Signer Analysis': {
     error: 2,
     warning: 1,
-    isCritical: false,
     description: 'Signer reuse across chain deployments',
   },
 };
@@ -134,7 +104,6 @@ export const PENALTY_CONFIG: Record<string, PenaltyConfig> = {
 export const DEFAULT_PENALTY: PenaltyConfig = {
   error: 8,
   warning: 4,
-  isCritical: false,
   description: 'Security check',
 };
 
@@ -146,9 +115,10 @@ export const DEFAULT_PENALTY: PenaltyConfig = {
  * frontend's SecurityCheck (which includes `loading` status and ReactNode messages).
  */
 export function calculateSecurityScore(checks: ScoringInput[]): SecurityScoreResult {
-  const totalChecks = checks.length;
-  const unavailableChecks = checks.filter(c => c && c.status === 'unavailable').length;
-  const completedChecks = checks.filter(c => c && c.status && c.status !== 'loading' && c.status !== 'unavailable').length;
+  const scored = checks.filter(c => c && c.title && !INFORMATIONAL_CHECKS.has(c.title));
+  const totalChecks = scored.length;
+  const unavailableChecks = scored.filter(c => c.status === 'unavailable').length;
+  const completedChecks = scored.filter(c => c.status && c.status !== 'loading' && c.status !== 'unavailable').length;
 
   if (completedChecks === 0) {
     return {
@@ -157,7 +127,6 @@ export function calculateSecurityScore(checks: ScoringInput[]): SecurityScoreRes
       rating: 'High Risk',
       description: 'Analysis in progress...',
       penalties: [],
-      criticalCount: 0,
       completedChecks,
       totalChecks,
       unavailableChecks,
@@ -165,11 +134,11 @@ export function calculateSecurityScore(checks: ScoringInput[]): SecurityScoreRes
   }
 
   let score = 100;
-  let criticalFailures = 0;
-  const penalties: { title: string; points: number; isCritical: boolean }[] = [];
+  const penalties: { title: string; points: number }[] = [];
 
   for (const check of checks) {
     if (!check || !check.status || check.status === 'loading' || check.status === 'unavailable') continue;
+    if (INFORMATIONAL_CHECKS.has(check.title)) continue;
 
     if (!PENALTY_CONFIG[check.title]) {
       console.warn(
@@ -180,21 +149,11 @@ export function calculateSecurityScore(checks: ScoringInput[]): SecurityScoreRes
 
     if (check.status === 'error') {
       score -= config.error;
-      penalties.push({ title: check.title, points: config.error, isCritical: config.isCritical });
-      if (config.isCritical) criticalFailures++;
+      penalties.push({ title: check.title, points: config.error });
     } else if (check.status === 'warning') {
       score -= config.warning;
-      penalties.push({ title: check.title, points: config.warning, isCritical: config.isCritical });
+      penalties.push({ title: check.title, points: config.warning });
     }
-  }
-
-  if (criticalFailures >= 3) {
-    score -= 8;
-    penalties.push({ title: 'Multiple Critical Issues', points: 8, isCritical: true });
-  }
-  if (criticalFailures >= 5) {
-    score -= 10;
-    penalties.push({ title: 'Severe Critical Issues', points: 10, isCritical: true });
   }
 
   const rawScore = Math.max(0, Math.min(100, score));
@@ -229,7 +188,6 @@ export function calculateSecurityScore(checks: ScoringInput[]): SecurityScoreRes
     rating,
     description,
     penalties: penalties.sort((a, b) => b.points - a.points),
-    criticalCount: criticalFailures,
     completedChecks,
     totalChecks,
     unavailableChecks,

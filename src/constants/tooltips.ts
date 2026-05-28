@@ -93,10 +93,10 @@ export const SECURITY_CHECK_TOOLTIPS: Record<string, TooltipInfo> = {
     learnMoreUrl: 'https://help.safe.global/en/articles/40838-what-is-a-fallback-handler-and-how-does-it-relate-to-safe'
   },
   'Chain Configuration': {
-    description: 'Checks if the Safe exists on multiple chains. Multi-chain deployments create replay attack risks. Security implications include: (1) Replay attack risk - signatures from one chain could potentially be replayed on another, (2) Ensure transactions include proper chain ID verification, (3) Consider using different Safe addresses for different chains.',
+    description: 'Checks if the Safe exists on multiple chains with the same address (canonical deployment). Multi-chain deployments are normal and expected — EIP-712 domain separators prevent cross-chain signature replay. This check is informational; see Multi-Chain Signer Analysis for the actual security risk (signer reuse across chains).',
     thresholds: [
       { status: '✅ Success', condition: 'Deployed on single chain only' },
-      { status: '⚠️ Warning', condition: 'Deployed on multiple chains (replay attack risk)' }
+      { status: 'ℹ️ Informational', condition: 'Deployed on multiple chains (check signer reuse)' }
     ],
     learnMoreUrl: 'https://docs.safe.global/advanced/eip-155'
   },

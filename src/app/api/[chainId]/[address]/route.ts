@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createPublicClient, http, isAddress, getAddress } from 'viem';
 import { multicall } from 'viem/actions';
-import { GNOSIS_SAFE_ABI, OFFICIAL_SAFE_FALLBACK_HANDLERS, OFFICIAL_SAFE_PROXY_FACTORIES, SAFE_VERSIONS_WITH_KNOWN_FACTORIES, SENTINEL_MODULES_ADDRESS } from '@/constants/contracts';
+import { GNOSIS_SAFE_ABI, OFFICIAL_SAFE_FALLBACK_HANDLERS, OFFICIAL_SAFE_PROXY_FACTORIES, SAFE_VERSIONS_WITH_KNOWN_FACTORIES, SENTINEL_MODULES_ADDRESS, GUARD_STORAGE_SLOT, FALLBACK_HANDLER_STORAGE_SLOT } from '@/constants/contracts';
 import { SUPPORTED_CHAINS, SAFE_TX_SERVICE_URLS, SAFE_GITHUB_RELEASES_URL, isBlockscout, buildExplorerApiUrl } from '@/constants/chains';
 import { calculateSecurityScore } from '@/lib/scoring';
 
@@ -68,8 +68,7 @@ interface ApiResponse {
     rating: 'High Risk' | 'Medium Risk' | 'Low Risk';
     position: number;
     description: string;
-    penalties: { title: string; points: number; isCritical: boolean }[];
-    criticalCount: number;
+    penalties: { title: string; points: number }[];
     completedChecks: number;
     totalChecks: number;
     unavailableChecks: number;
@@ -252,15 +251,21 @@ export async function GET(
       } catch {}
       let guard: string | null = null;
       try {
-        guard = await executeWithBackup((client) => {
-          return client.readContract({ address: address as `0x${string}`, abi: [{"inputs":[],"name":"getGuard","outputs":[{"internalType":"address","name":"","type":"address"}],"stateMutability":"view","type":"function"}], functionName: 'getGuard', args: [] });
+        const guardSlot = await executeWithBackup<`0x${string}` | undefined>((client) => {
+          return client.getStorageAt({ address: address as `0x${string}`, slot: GUARD_STORAGE_SLOT as `0x${string}` });
         });
+        const zeroSlot = '0x0000000000000000000000000000000000000000000000000000000000000000';
+        guard = guardSlot && guardSlot !== zeroSlot ? `0x${guardSlot.slice(26)}` : '0x0000000000000000000000000000000000000000';
       } catch {}
       let fallbackHandler: string | null = null;
       try {
-        fallbackHandler = await executeWithBackup((client) => {
-          return client.readContract({ address: address as `0x${string}`, abi: [{"inputs":[],"name":"getFallbackHandler","outputs":[{"internalType":"address","name":"handler","type":"address"}],"stateMutability":"view","type":"function"}], functionName: 'getFallbackHandler', args: [] });
+        const fallbackSlot = await executeWithBackup<`0x${string}` | undefined>((client) => {
+          return client.getStorageAt({ address: address as `0x${string}`, slot: FALLBACK_HANDLER_STORAGE_SLOT as `0x${string}` });
         });
+        const zeroSlot = '0x0000000000000000000000000000000000000000000000000000000000000000';
+        if (fallbackSlot && fallbackSlot !== zeroSlot) {
+          fallbackHandler = `0x${fallbackSlot.slice(26)}`;
+        }
       } catch {}
       return { version: version as string, threshold: Number(threshold), owners: owners as string[], nonce: Number(nonce), modules, guard: guard as string, fallbackHandler: fallbackHandler as string };
     };
@@ -275,22 +280,24 @@ export async function GET(
     let fallbackHandler: string | null = null;
 
     try {
-      const multicallData = await executeWithBackup((client) => {
-        return multicall(client, {
-          contracts: [
-            { address: address as `0x${string}`, abi: GNOSIS_SAFE_ABI, functionName: 'VERSION' },
-            { address: address as `0x${string}`, abi: GNOSIS_SAFE_ABI, functionName: 'getThreshold' },
-            { address: address as `0x${string}`, abi: GNOSIS_SAFE_ABI, functionName: 'getOwners' },
-            { address: address as `0x${string}`, abi: GNOSIS_SAFE_ABI, functionName: 'nonce' },
-            { address: address as `0x${string}`, abi: GNOSIS_SAFE_ABI, functionName: 'getModulesPaginated', args: [SENTINEL_MODULES_ADDRESS, 10n] },
-            { address: address as `0x${string}`, abi: [{"inputs":[],"name":"getGuard","outputs":[{"internalType":"address","name":"","type":"address"}],"stateMutability":"view","type":"function"}], functionName: 'getGuard', args: [] },
-            { address: address as `0x${string}`, abi: [{"inputs":[],"name":"getFallbackHandler","outputs":[{"internalType":"address","name":"handler","type":"address"}],"stateMutability":"view","type":"function"}], functionName: 'getFallbackHandler', args: [] },
-          ],
-          allowFailure: true,
-        });
+      const [multicallData, guardSlotValue, fallbackSlotValue] = await executeWithBackup((client) => {
+        return Promise.all([
+          multicall(client, {
+            contracts: [
+              { address: address as `0x${string}`, abi: GNOSIS_SAFE_ABI, functionName: 'VERSION' },
+              { address: address as `0x${string}`, abi: GNOSIS_SAFE_ABI, functionName: 'getThreshold' },
+              { address: address as `0x${string}`, abi: GNOSIS_SAFE_ABI, functionName: 'getOwners' },
+              { address: address as `0x${string}`, abi: GNOSIS_SAFE_ABI, functionName: 'nonce' },
+              { address: address as `0x${string}`, abi: GNOSIS_SAFE_ABI, functionName: 'getModulesPaginated', args: [SENTINEL_MODULES_ADDRESS, 10n] },
+            ],
+            allowFailure: true,
+          }),
+          client.getStorageAt({ address: address as `0x${string}`, slot: GUARD_STORAGE_SLOT as `0x${string}` }),
+          client.getStorageAt({ address: address as `0x${string}`, slot: FALLBACK_HANDLER_STORAGE_SLOT as `0x${string}` }),
+        ]);
       });
 
-      const [versionResult, thresholdResult, ownersResult, nonceResult, modulesResult, guardResult, fallbackHandlerResult] = multicallData;
+      const [versionResult, thresholdResult, ownersResult, nonceResult, modulesResult] = multicallData;
 
       if (versionResult.status !== 'success' || thresholdResult.status !== 'success' || ownersResult.status !== 'success' || nonceResult.status !== 'success') {
         throw new Error('Multicall returned partial failures');
@@ -301,8 +308,9 @@ export async function GET(
       owners = ownersResult.result as string[];
       nonce = Number(nonceResult.result);
       modules = modulesResult.status === 'success' ? [...(modulesResult.result as any)[0]] as string[] : [];
-      guard = guardResult.status === 'success' ? guardResult.result as string : null;
-      fallbackHandler = fallbackHandlerResult.status === 'success' ? fallbackHandlerResult.result as string : null;
+      const zeroSlot = '0x0000000000000000000000000000000000000000000000000000000000000000';
+      guard = guardSlotValue && guardSlotValue !== zeroSlot ? `0x${guardSlotValue.slice(26)}` : '0x0000000000000000000000000000000000000000';
+      fallbackHandler = fallbackSlotValue && fallbackSlotValue !== zeroSlot ? `0x${fallbackSlotValue.slice(26)}` : null;
     } catch (multicallError) {
       if (isContractRevertError(multicallError) || (multicallError instanceof Error && /revert|does not appear/i.test(multicallError.message))) {
         const errorResponse: ApiResponse = { address, chainId: parseInt(chainId), chainName: chain.name, analyzedAt: new Date().toISOString(), success: false, error: 'This address is a contract but does not appear to be a Gnosis Safe multisig. Only Safe multisig addresses are supported.' };
@@ -331,7 +339,7 @@ export async function GET(
     const successResponse: ApiResponse = {
       address, chainId: parseInt(chainId), chainName: chain.name, analyzedAt: new Date().toISOString(), success: true,
       safeInfo: { version, threshold, owners, nonce, modules, guard, fallbackHandler },
-      securityScore: { score: securityScore.rawScore, rating: securityScore.rating, position: securityScore.position, description: securityScore.description, penalties: securityScore.penalties, criticalCount: securityScore.criticalCount, completedChecks: securityScore.completedChecks, totalChecks: securityScore.totalChecks, unavailableChecks: securityScore.unavailableChecks },
+      securityScore: { score: securityScore.rawScore, rating: securityScore.rating, position: securityScore.position, description: securityScore.description, penalties: securityScore.penalties, completedChecks: securityScore.completedChecks, totalChecks: securityScore.totalChecks, unavailableChecks: securityScore.unavailableChecks },
       checks
     };
 

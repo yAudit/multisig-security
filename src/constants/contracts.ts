@@ -108,3 +108,9 @@ export const SAFE_VERSIONS_WITH_KNOWN_FACTORIES = new Set(
 
 // Sentinel address used for modules list
 export const SENTINEL_MODULES_ADDRESS = '0x0000000000000000000000000000000000000001';
+
+// Storage slots for guard and fallback handler (stable across Safe v1.3.0+)
+// These must be read via eth_getStorageAt because Safe v1.4.1 removed the
+// public getGuard() and getFallbackHandler() functions to save bytecode size.
+export const GUARD_STORAGE_SLOT = '0x4a204f620c8c5ccdca3fd54d003badd85ba500436a431f0cbda4f558c93c34c8';
+export const FALLBACK_HANDLER_STORAGE_SLOT = '0x6c9a6c4a39284e37ed1cf53d337577d14212a4870fb976a4366c693b939918d5';
