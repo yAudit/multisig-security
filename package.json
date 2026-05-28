@@ -1,14 +1,13 @@
 {
   "name": "multisig-safe-security-checker",
-  "version": "0.1.0",
+  "version": "2.0.0",
   "private": true,
   "scripts": {
-    "dev": "next dev --turbopack --hostname localhost",
-    "build": "next build --turbopack",
-    "start": "next start",
-    "lint": "eslint",
-    "type-check": "tsc --noEmit",
-    "analyze": "ANALYZE=true npm run build",
+    "dev": "pnpm next dev --turbopack --hostname localhost",
+    "build": "pnpm next build --turbopack",
+    "start": "pnpm next start",
+    "lint": "pnpm eslint",
+    "type-check": "pnpm tsc --noEmit",
     "clean": "rm -rf .next out node_modules/.cache"
   },
   "dependencies": {

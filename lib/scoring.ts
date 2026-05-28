@@ -60,10 +60,10 @@ export const PENALTY_CONFIG: Record<string, PenaltyConfig> = {
     warning: 4,
     description: 'Safe singleton contract version',
   },
-  'Safe Factory': {
-    error: 10,
-    warning: 4,
-    description: 'Checks if Safe was deployed by an official proxy factory',
+  'Singleton Integrity': {
+    error: 25,
+    warning: 12,
+    description: 'Verifies the proxy delegates to an official, audited Safe singleton',
   },
 
   // Other checks

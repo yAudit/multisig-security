@@ -11,10 +11,10 @@ Further information about the analysis is available in this post: https://blog.y
 ## Key Capabilities
 
 - **Deep Safe introspection** – batch RPC calls retrieve the Safe version, owner set, signing threshold, nonce, enabled modules, guard, and fallback handler.
-- **Security heuristics** – sixteen checks score each Safe on threshold quality, signing speed, proxy factory provenance, owner activity, EOA vs contract signers, optional modules, fallback handler provenance, emergency recovery settings, and more.
+- **Security heuristics** – twelve scored checks evaluate threshold quality, signing speed, singleton integrity, owner activity, EOA vs contract signers, optional modules, and more, plus four informational checks (chain configuration, transaction guard, fallback handler, emergency recovery) displayed separately.
 - **Signing speed analysis** – measures average time between first and last confirmation across recent transactions to flag potential signer centralization.
-- **Factory verification** – checks whether the Safe was deployed by an official Safe proxy factory, with version-aware scoring for versions where no factory addresses are catalogued.
-- **Cross-chain awareness** – detects deployments across Ethereum, Base, Arbitrum, Optimism, Polygon, BNB Chain, Sonic, and Katana, then warns when signers are reused between chains (replay-attack risk).
+- **Singleton integrity** – verifies that the Safe proxy delegates to an official, audited singleton (master copy) contract. An unofficial singleton is a critical failure even if the Safe was deployed by an official factory, since `createProxyWithNonce()` accepts any singleton address.
+- **Cross-chain awareness** – detects deployments across Ethereum, Base, Arbitrum, Optimism, Polygon, BNB Chain, Sonic, and Katana, then warns when signers are reused between chains (EIP-712 domain separators prevent cross-chain signature replay, but shared keys still mean single-key compromise affects all chains).
 - **Fresh data sources** – combines viem RPC calls, Safe Protocol Kit helpers, Safe Transaction Service APIs, GitHub release metadata, and Etherscan-style explorer APIs with rate limiting and RPC fallbacks.
 - **Human-friendly UX** – color-coded score bar, hover tooltips that explain every check, and curated example Safes for each chain so you can demo the tool instantly.
 

@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createPublicClient, http, isAddress, getAddress } from 'viem';
 import { multicall } from 'viem/actions';
-import { GNOSIS_SAFE_ABI, OFFICIAL_SAFE_FALLBACK_HANDLERS, OFFICIAL_SAFE_PROXY_FACTORIES, SAFE_VERSIONS_WITH_KNOWN_FACTORIES, SENTINEL_MODULES_ADDRESS, GUARD_STORAGE_SLOT, FALLBACK_HANDLER_STORAGE_SLOT } from '@/constants/contracts';
+import { GNOSIS_SAFE_ABI, OFFICIAL_SAFE_FALLBACK_HANDLERS, OFFICIAL_SAFE_PROXY_FACTORIES, OFFICIAL_SAFE_SINGLETONS, SENTINEL_MODULES_ADDRESS, GUARD_STORAGE_SLOT, FALLBACK_HANDLER_STORAGE_SLOT } from '@/constants/contracts';
 import { SUPPORTED_CHAINS, SAFE_TX_SERVICE_URLS, SAFE_GITHUB_RELEASES_URL, isBlockscout, buildExplorerApiUrl } from '@/constants/chains';
 import { calculateSecurityScore } from '@/lib/scoring';
 
@@ -249,23 +249,24 @@ export async function GET(
         });
         modules = moduleArray as string[];
       } catch {}
+      const zeroSlot = '0x0000000000000000000000000000000000000000000000000000000000000000';
+      const extractAddress = (slot: string | undefined): string | null => {
+        if (!slot || slot === zeroSlot || slot.length < 66) return null;
+        return `0x${slot.slice(-40)}`;
+      };
       let guard: string | null = null;
       try {
         const guardSlot = await executeWithBackup<`0x${string}` | undefined>((client) => {
           return client.getStorageAt({ address: address as `0x${string}`, slot: GUARD_STORAGE_SLOT as `0x${string}` });
         });
-        const zeroSlot = '0x0000000000000000000000000000000000000000000000000000000000000000';
-        guard = guardSlot && guardSlot !== zeroSlot ? `0x${guardSlot.slice(26)}` : '0x0000000000000000000000000000000000000000';
+        guard = extractAddress(guardSlot) || '0x0000000000000000000000000000000000000000';
       } catch {}
       let fallbackHandler: string | null = null;
       try {
         const fallbackSlot = await executeWithBackup<`0x${string}` | undefined>((client) => {
           return client.getStorageAt({ address: address as `0x${string}`, slot: FALLBACK_HANDLER_STORAGE_SLOT as `0x${string}` });
         });
-        const zeroSlot = '0x0000000000000000000000000000000000000000000000000000000000000000';
-        if (fallbackSlot && fallbackSlot !== zeroSlot) {
-          fallbackHandler = `0x${fallbackSlot.slice(26)}`;
-        }
+        fallbackHandler = extractAddress(fallbackSlot);
       } catch {}
       return { version: version as string, threshold: Number(threshold), owners: owners as string[], nonce: Number(nonce), modules, guard: guard as string, fallbackHandler: fallbackHandler as string };
     };
@@ -307,10 +308,16 @@ export async function GET(
       threshold = Number(thresholdResult.result);
       owners = ownersResult.result as string[];
       nonce = Number(nonceResult.result);
-      modules = modulesResult.status === 'success' ? [...(modulesResult.result as any)[0]] as string[] : [];
+      modules = modulesResult.status === 'success' && Array.isArray(modulesResult.result) && Array.isArray(modulesResult.result[0])
+        ? [...modulesResult.result[0]] as string[]
+        : [];
       const zeroSlot = '0x0000000000000000000000000000000000000000000000000000000000000000';
-      guard = guardSlotValue && guardSlotValue !== zeroSlot ? `0x${guardSlotValue.slice(26)}` : '0x0000000000000000000000000000000000000000';
-      fallbackHandler = fallbackSlotValue && fallbackSlotValue !== zeroSlot ? `0x${fallbackSlotValue.slice(26)}` : null;
+      const extractAddress = (slot: string | undefined): string | null => {
+        if (!slot || slot === zeroSlot || slot.length < 66) return null;
+        return `0x${slot.slice(-40)}`;
+      };
+      guard = extractAddress(guardSlotValue) || '0x0000000000000000000000000000000000000000';
+      fallbackHandler = extractAddress(fallbackSlotValue);
     } catch (multicallError) {
       if (isContractRevertError(multicallError) || (multicallError instanceof Error && /revert|does not appear/i.test(multicallError.message))) {
         const errorResponse: ApiResponse = { address, chainId: parseInt(chainId), chainName: chain.name, analyzedAt: new Date().toISOString(), success: false, error: 'This address is a contract but does not appear to be a Gnosis Safe multisig. Only Safe multisig addresses are supported.' };
@@ -366,7 +373,7 @@ async function performAllSecurityChecks(params: {
   const { address, chainId, version, threshold, owners, nonce, modules, guard, fallbackHandler, client } = params;
 
   const thresholdPct = owners.length > 0 ? (threshold / owners.length) * 100 : 0;
-  const thresholdStatus: SecurityCheck['status'] = threshold === 1 ? 'error' : threshold <= THRESHOLD_LOW_ABSOLUTE && thresholdPct < THRESHOLD_MAJORITY_PCT ? 'warning' : 'success';
+  const thresholdStatus: SecurityCheck['status'] = threshold === 0 || threshold === 1 ? 'error' : threshold <= THRESHOLD_LOW_ABSOLUTE && thresholdPct < THRESHOLD_MAJORITY_PCT ? 'warning' : 'success';
   const pctStatus: SecurityCheck['status'] = thresholdPct < THRESHOLD_LOW_PCT ? 'error' : thresholdPct < THRESHOLD_MAJORITY_PCT ? 'warning' : 'success';
   const nonceStatus: SecurityCheck['status'] = nonce <= NONCE_ERROR_MAX ? 'error' : nonce <= NONCE_WARNING_MAX ? 'warning' : 'success';
 
@@ -387,7 +394,7 @@ async function performAllSecurityChecks(params: {
     safeVersionCheck,
     contractCreationCheck,
     lastTransactionCheck,
-    safeFactoryCheck,
+    singletonIntegrityCheck,
     multiChainResult,
     ownerActivityCheck,
     emergencyRecoveryCheck,
@@ -397,7 +404,7 @@ async function performAllSecurityChecks(params: {
     checkSafeVersion(version),
     checkContractCreationDate(address, chainId),
     checkLastTransactionDate(address, chainId, nonce),
-    checkSafeFactory(address, chainId, version),
+    checkSingletonIntegrity(address, chainId),
     checkMultiChainDeployment(address, chainId),
     checkOwnerActivity(owners, chainId),
     checkEmergencyRecovery(modules, threshold, chainId, client),
@@ -415,7 +422,7 @@ async function performAllSecurityChecks(params: {
     contractCreationCheck,
     { id: 'multisig_nonce', title: 'Multisig Nonce', status: nonceStatus, message: nonce <= NONCE_ERROR_MAX ? `Very low usage: only ${nonce} transaction${nonce !== 1 ? 's' : ''} executed.` : nonce <= NONCE_WARNING_MAX ? `Low usage: ${nonce} transactions executed.` : `Active usage: ${nonce} transactions executed.`, details: { nonce } },
     lastTransactionCheck,
-    safeFactoryCheck,
+    singletonIntegrityCheck,
     { id: 'optional_modules', title: 'Optional Modules', status: modules.length === 0 ? 'success' : 'warning', message: modules.length === 0 ? 'No optional modules are enabled. Uses standard Safe functionality only.' : `${modules.length} module${modules.length === 1 ? '' : 's'} enabled. Review module security.`, details: { modules, count: modules.length } },
     guardCheck,
     { id: 'fallback_handler', title: 'Fallback Handler', status: fbStatus, message: fallbackHandler === null ? 'Could not check fallback handler status' : (fallbackHandler === '0x0000000000000000000000000000000000000000' || fallbackHandler === '') ? 'No fallback handler enabled. Uses standard Safe functionality only.' : isOfficialHandler ? `Known Safe fallback handler enabled: ${isOfficialHandler}` : 'Custom fallback handler enabled. Review handler contract security.', details: { fallbackHandler, isOfficial: !!isOfficialHandler } },
@@ -527,8 +534,29 @@ async function checkSafeVersion(version: string): Promise<SecurityCheck> {
   }
 }
 
-// 5. Contract Creation Date (finds actual creation tx, matching frontend)
+// 5. Contract Creation Date (uses Safe Transaction Service as primary source, Etherscan as fallback)
 async function checkContractCreationDate(address: string, chainId: number): Promise<SecurityCheck> {
+  // 1. Try Safe Transaction Service first (free, no API key needed on most chains)
+  const txServiceUrl = SAFE_TX_SERVICE_URLS[chainId];
+  if (txServiceUrl) {
+    try {
+      const url = `${txServiceUrl}/api/v1/safes/${address}/creation/`;
+      const response = await fetch(url, { headers: { Accept: 'application/json' } });
+      if (response.ok) {
+        const data = await response.json();
+        if (data.created) {
+          const creationDate = new Date(data.created);
+          const daysAgo = Math.floor((Date.now() - creationDate.getTime()) / (1000 * 60 * 60 * 24));
+          const status: SecurityCheck['status'] = daysAgo <= CONTRACT_AGE_ERROR_DAYS ? 'error' : daysAgo <= CONTRACT_AGE_WARNING_DAYS ? 'warning' : 'success';
+          return { id: 'contract_creation_date', title: 'Contract Creation Date', status, message: status === 'error' ? `Very recently deployed (${daysAgo} days ago). New contracts carry higher risk.` : status === 'warning' ? `Recently deployed (${daysAgo} days ago). Relatively new contract.` : `Established contract deployed ${daysAgo} days ago.`, details: { daysAgo, creationDate: creationDate.toISOString() } };
+        }
+      }
+    } catch {
+      // Fall through to Etherscan fallback
+    }
+  }
+
+  // 2. Fallback: Etherscan/Blockscout explorer API
   const apiUrl = getExplorerApiUrl(chainId);
   const apiKey = process.env.NEXT_PUBLIC_ETHERSCAN_API_KEY || null;
   if (!apiUrl || (!apiKey && !isBlockscout(apiUrl))) return { id: 'contract_creation_date', title: 'Contract Creation Date', status: 'unavailable', message: 'Could not determine contract creation date (API not available)' };
@@ -558,10 +586,31 @@ async function checkContractCreationDate(address: string, chainId: number): Prom
   }
 }
 
-// 7. Last Transaction Date
+// 7. Last Transaction Date (uses Safe Transaction Service as primary source, Etherscan as fallback)
 async function checkLastTransactionDate(address: string, chainId: number, nonce: number): Promise<SecurityCheck> {
   if (nonce === 0) return { id: 'last_transaction_date', title: 'Last Transaction Date', status: 'warning', message: 'No transactions found. This Safe has never been used.', details: { nonce } };
 
+  // 1. Try Safe Transaction Service first (free, no API key needed on most chains)
+  const txServiceUrl = SAFE_TX_SERVICE_URLS[chainId];
+  if (txServiceUrl) {
+    try {
+      const url = `${txServiceUrl}/api/v1/safes/${address}/multisig-transactions/?limit=1&ordering=-nonce`;
+      const response = await fetch(url, { headers: { Accept: 'application/json' } });
+      if (response.ok) {
+        const data = await response.json();
+        if (data.results && data.results.length > 0 && data.results[0].executionDate) {
+          const lastDate = new Date(data.results[0].executionDate);
+          const daysAgo = Math.floor((Date.now() - lastDate.getTime()) / (1000 * 60 * 60 * 24));
+          const status: SecurityCheck['status'] = daysAgo >= INACTIVITY_ERROR_DAYS ? 'error' : daysAgo >= INACTIVITY_WARNING_DAYS ? 'warning' : 'success';
+          return { id: 'last_transaction_date', title: 'Last Transaction Date', status, message: status === 'error' ? `Inactive for ${daysAgo} days. Last transaction: ${lastDate.toDateString()}.` : status === 'warning' ? `Last used ${daysAgo} days ago on ${lastDate.toDateString()}.` : `Recently active. Last transaction: ${lastDate.toDateString()} (${daysAgo} days ago).`, details: { daysAgo, lastDate: lastDate.toISOString() } };
+        }
+      }
+    } catch {
+      // Fall through to Etherscan fallback
+    }
+  }
+
+  // 2. Fallback: Etherscan/Blockscout explorer API
   const apiUrl = getExplorerApiUrl(chainId);
   const apiKey = process.env.NEXT_PUBLIC_ETHERSCAN_API_KEY || null;
   if (!apiUrl || (!apiKey && !isBlockscout(apiUrl))) return { id: 'last_transaction_date', title: 'Last Transaction Date', status: 'unavailable', message: 'Could not determine last transaction date (API not available)' };
@@ -589,28 +638,35 @@ async function checkLastTransactionDate(address: string, chainId: number, nonce:
   }
 }
 
-// 8. Safe Factory
-async function checkSafeFactory(address: string, chainId: number, safeVersion: string): Promise<SecurityCheck> {
+// 8. Singleton Integrity
+async function checkSingletonIntegrity(address: string, chainId: number): Promise<SecurityCheck> {
   const baseUrl = SAFE_TX_SERVICE_URLS[chainId];
-  const versionHasKnownFactories = SAFE_VERSIONS_WITH_KNOWN_FACTORIES.has(safeVersion);
-  if (!baseUrl) return { id: 'safe_factory', title: 'Safe Factory', status: 'unavailable', message: 'Could not determine deployment factory: Unsupported chain' };
+  if (!baseUrl) return { id: 'singleton_integrity', title: 'Singleton Integrity', status: 'unavailable', message: 'Could not determine singleton: Unsupported chain' };
 
   try {
     const checksummedAddress = getAddress(address);
     const url = `${baseUrl}/api/v1/safes/${checksummedAddress}/creation/`;
     const response = await fetch(url, { headers: { Accept: 'application/json' } });
-    if (!response.ok) return { id: 'safe_factory', title: 'Safe Factory', status: 'unavailable', message: 'Could not determine deployment factory.' };
+    if (!response.ok) return { id: 'singleton_integrity', title: 'Singleton Integrity', status: 'unavailable', message: 'Could not determine singleton.' };
 
     const data = await response.json();
+    const masterCopy = data.masterCopy;
+    if (!masterCopy) return { id: 'singleton_integrity', title: 'Singleton Integrity', status: 'unavailable', message: 'Could not determine singleton.' };
+
+    const chainSingletons = OFFICIAL_SAFE_SINGLETONS[chainId];
+    if (!chainSingletons) return { id: 'singleton_integrity', title: 'Singleton Integrity', status: 'unavailable', message: 'No singleton registry for this chain.' };
+
+    const singletonName = chainSingletons[masterCopy.toLowerCase()] || null;
+    if (singletonName) return { id: 'singleton_integrity', title: 'Singleton Integrity', status: 'success', message: `Delegates to official singleton: ${singletonName}`, details: { masterCopy, singletonName, isOfficial: true } };
+
     const factoryAddress = data.factoryAddress;
-    if (!factoryAddress) return { id: 'safe_factory', title: 'Safe Factory', status: 'unavailable', message: 'Could not determine deployment factory.' };
-
-    const factoryInfo = OFFICIAL_SAFE_PROXY_FACTORIES[factoryAddress.toLowerCase()] || null;
-    if (factoryInfo) return { id: 'safe_factory', title: 'Safe Factory', status: 'success', message: `Deployed by official factory: ${factoryInfo.name}`, details: { factoryAddress, factoryName: factoryInfo.name, isOfficial: true } };
-
-    return { id: 'safe_factory', title: 'Safe Factory', status: versionHasKnownFactories ? 'error' : 'warning', message: versionHasKnownFactories ? 'Deployed by unrecognized factory. Verify this Safe was not created with modified code.' : 'Deployed by unrecognized factory. No known official factories for this Safe version, so this may be expected.', details: { factoryAddress, isOfficial: false, versionHasKnownFactories } };
+    const factoryInfo = OFFICIAL_SAFE_PROXY_FACTORIES[factoryAddress?.toLowerCase()] || null;
+    const factoryNote = factoryInfo
+      ? ` (deployed by official factory: ${factoryInfo.name}, but singleton is unrecognized)`
+      : '';
+    return { id: 'singleton_integrity', title: 'Singleton Integrity', status: 'error', message: `Unrecognized singleton address.${factoryNote} Verify this Safe was not created with modified code.`, details: { masterCopy, isOfficial: false, factoryAddress, factoryNote } };
   } catch (error) {
-    return { id: 'safe_factory', title: 'Safe Factory', status: 'unavailable', message: `Could not determine deployment factory: ${error instanceof Error ? error.message : 'Unknown error'}` };
+    return { id: 'singleton_integrity', title: 'Singleton Integrity', status: 'unavailable', message: `Could not determine singleton: ${error instanceof Error ? error.message : 'Unknown error'}` };
   }
 }
 
@@ -647,7 +703,7 @@ async function checkMultiChainDeployment(address: string, currentChainId: number
   }
 
   if (deployedChains === 1) return { check: { id: 'chain_configuration', title: 'Chain Configuration', status: 'success', message: `Safe is deployed only on ${chainNames[0]}. No multi-chain deployment detected.`, details: { deployedChains, chainNames } }, deployedChainIds };
-  return { check: { id: 'chain_configuration', title: 'Chain Configuration', status: 'warning', message: `Multi-chain deployment detected. Safe exists on ${deployedChains} chains: ${chainNames.join(', ')}`, details: { deployedChains, chainNames } }, deployedChainIds };
+  return { check: { id: 'chain_configuration', title: 'Chain Configuration', status: 'success', message: `Multi-chain deployment detected. Safe exists on ${deployedChains} chains: ${chainNames.join(', ')}`, details: { deployedChains, chainNames } }, deployedChainIds };
 }
 
 // 13. Owner Activity Analysis (full implementation matching frontend)
@@ -786,7 +842,7 @@ const isRecoveryModule = KNOWN_RECOVERY_MODULE_KEYWORDS.some(keyword => lowerNam
   const normalThresholdNum = Number(threshold);
 
   if (recoveryModules.length === 0) {
-    return { id: 'emergency_recovery_mechanisms', title: 'Emergency Recovery Mechanisms', status: 'success', message: 'No recovery module detected. Uses standard Safe module configuration.', details: { modules, moduleCount: modules.length } };
+    return { id: 'emergency_recovery_mechanisms', title: 'Emergency Recovery Mechanisms', status: 'warning', message: 'No recovery module detected. Consider implementing social recovery or guardian mechanisms for emergency access.', details: { modules, moduleCount: modules.length } };
   }
 
   let thresholdComparison: 'lower' | 'equal' | 'higher' | 'unknown' = 'unknown';
