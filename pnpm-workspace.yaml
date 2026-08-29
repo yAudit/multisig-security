@@ -1,5 +1,7 @@
 minimumReleaseAge: 7
 blockExoticSubdeps: true
+overrides:
+  eslint-import-resolver-typescript: ^4.4.5
 allowBuilds:
   sharp: true
   unrs-resolver: true

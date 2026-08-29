@@ -934,7 +934,7 @@ export default function MultisigChecker({ initialChainId, initialAddress, autoAn
       const chainResults = await Promise.allSettled(
         deployedChains.map(async (chain) => {
           const maxRetries = 3;
-          let owners: string[] | null = null;
+          const owners: string[] | null = null;
 
           for (let retryCount = 0; retryCount < maxRetries && owners === null; retryCount++) {
             try {
